@@ -1,0 +1,21 @@
+{
+  "name": "marketplace",
+  "version": "1.0.0",
+  "description": "Marketplace API — OpenAPI contract + runtime validation (hw-09, Variant B)",
+  "private": true,
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "lint:spec": "redocly lint openapi/openapi.yaml",
+    "bundle:spec": "redocly bundle openapi/openapi.yaml -o spec.json"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.22.2",
+    "express-openapi-validator": "^5.6.2"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.46.0",
+    "nodemon": "^3.1.14"
+  }
+}
