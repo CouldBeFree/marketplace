@@ -22,8 +22,25 @@ app.use(
   })
 );
 
+function paginate(all, req) {
+  const limit = Number(req.query.limit ?? 20);
+  const cursor = req.query.cursor;
+  let start = 0;
+  if (cursor !== undefined) {
+    const lastId = Buffer.from(cursor, 'base64url').toString('utf8');
+    const idx = all.findIndex((x) => x.id === lastId);
+    start = idx === -1 ? all.length : idx + 1;
+  }
+  const items = all.slice(start, start + limit);
+  const hasMore = start + limit < all.length;
+  const next_cursor = hasMore
+    ? Buffer.from(items[items.length - 1].id).toString('base64url')
+    : null;
+  return { items, next_cursor };
+}
+
 app.get('/products', (req, res) => {
-  res.json({ items: products, next_cursor: null });
+  res.json(paginate(products, req));
 });
 
 app.get('/products/:id', (req, res) => {
@@ -89,6 +106,10 @@ app.post('/orders', (req, res) => {
   orders.push(order);
   idempotencyStore.set(key, { bodyKey, status: 201, response: order });
   res.status(201).json(order);
+});
+
+app.get('/orders', (req, res) => {
+  res.json(paginate(orders, req));
 });
 
 app.use((err, req, res, next) => {
