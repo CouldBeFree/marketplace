@@ -248,6 +248,7 @@ components:
 
     OrderCreate:
       type: object
+      additionalProperties: false
       required: [items]
       properties:
         items:
