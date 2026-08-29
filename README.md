@@ -1,48 +1,72 @@
-# Marketplace API — ДЗ №1 (гілка `hw-09`)
+# Marketplace API — Nest-версія (гілка `nestjs`)
 
-Перше домашнє завдання курсового проєкту **Marketplace API**. Мета — спроєктувати
-**контракт** (OpenAPI-спеку) ще до написання ендпойнтів і поставити «того, хто звіряє»,
-щоб спека машинно перевірялась, а не залишалась просто файлом.
+Порт застосунку **Marketplace API** з мінімального Express на **NestJS**, зі збереженням
+початкової філософії ДЗ: **contract-first**. `openapi/openapi.yaml` лишається **джерелом
+правди**, а Nest працює поверх Express, у який глобальним middleware вбудовано
+[`express-openapi-validator`](https://www.npmjs.com/package/express-openapi-validator).
 
-## Обраний варіант contract-частини: **ВАРІАНТ Б — runtime-валідація**
+> Це відгалуження від гілки з ДЗ №1. Оригінальна Express-версія (`app.js`) — на `main`.
 
-Мінімальний **Express**-сервер, де [`express-openapi-validator`](https://www.npmjs.com/package/express-openapi-validator)
-валідує **запити й відповіді** проти нашої спеки, а error-handler перекладає його
-помилки у `application/problem+json` (RFC 7807).
+## Підхід: contract-first (не code-first)
 
-> Варіант А (consumer-driven Pact) свідомо **не** обрано.
+Валідація запитів **і відповідей** — на валідаторі проти спеки, а не на DTO + `class-validator`.
+Тобто `@nestjs/swagger` спеку **не генерує**; навпаки — спека диктує контракт, а контролери
+лишаються тонкими. Це зберігає «Варіант Б» з ДЗ: `validateResponses: true` ловить **DRIFT**
+між тим, що віддає хендлер, і схемою відповіді (розбіжність імен полів → 500, а не тихо
+зіпсована відповідь).
 
-Ключова деталь: увімкнено `validateResponses: true` — валідатор ловить **DRIFT** між тим,
-що віддає хендлер, і схемою відповіді у спеці. Якщо імена полів розійдуться — це 500, а не
-тихо зіпсована відповідь.
+### Як валідатор інтегровано в Nest (три ключові деталі)
+
+Nest ховає Express-інстанс усередині, тож порядок middleware треба вибудувати вручну
+(`src/main.ts`):
+
+1. **`bodyParser: false` + власний `express.json()` ПЕРЕД валідатором.** Інакше валідатор
+   спрацює раніше за парсинг тіла й побачить `req.body === undefined`.
+2. **Валідатор чіпляємо на express-інстанс ДО `app.init()`** — щоб він стояв раніше за роутер
+   Nest і встиг перевірити запит.
+3. **Express-error-handler додаємо ПІСЛЯ `app.init()`** — щоб він був останнім (arity-4) і
+   ловив `next(err)` від валідатора запитів. Помилки, кинуті вже _всередині_ Nest
+   (404/422, drift відповіді), ловить глобальний `ProblemJsonFilter`. Обидва шляхи віддають
+   однаковий `application/problem+json`.
 
 ## Стек і версії
 
 | Пакет | Версія | Навіщо |
 |---|---|---|
 | Node | v24.13.1 | стенд |
-| npm | 11.8.0 | — |
-| Модульна система | **CommonJS** (без `"type": "module"`) | приклади валідатора йдуть через `require(...)` |
+| NestJS (`@nestjs/*`) | ^10.4 | фреймворк; platform-express тримає **Express 4** під капотом |
 | express | 4.22.2 | з express@4 валідатор працює без сюрпризів (express@5 — ні) |
-| express-openapi-validator | 5.6.2 | runtime-валідація запитів і відповідей |
+| express-openapi-validator | 5.6.2 | runtime-валідація запитів і відповідей проти спеки |
+| TypeScript | ^5.6 | Nest — на TS (декоратори + `emitDecoratorMetadata`) |
 | @redocly/cli | 2.46.0 (dev) | lint + bundle спеки |
-| nodemon | 3.1.x (dev) | автоперезапуск у розробці |
+
+> **Чому Nest 10, а не 11:** Nest 11 за замовчуванням тягне Express 5, з яким
+> `express-openapi-validator` не дружить. Nest 10 = Express 4 — тому інтеграція стабільна.
+
+> **Чому не `node --experimental-strip-types`:** Nest покладається на метадані декораторів
+> (`reflect-metadata` + `emitDecoratorMetadata`), а type-stripping їх не емітить. Тому потрібен
+> справжній компіляційний крок (`tsc`).
 
 ## Структура
 
 ```
 marketplace/
 ├── openapi/
-│   └── openapi.yaml    # спека: 2 ресурси, 5 операцій, cursor-пагінація,
-│                       #        Idempotency-Key, problem+json
-├── app.js              # Express + express-openapi-validator (Варіант Б)
-├── package.json        # залежності + скрипти
-├── README.md           # цей файл
-├── CLAUDE.md           # опис завдання й домовленостей
-└── .gitignore          # node_modules/, spec.json, ...
+│   └── openapi.yaml          # джерело правди (не змінювалось при порті)
+├── src/
+│   ├── main.ts               # bootstrap: json → валідатор → Nest → error-handler
+│   ├── app.module.ts
+│   ├── common/
+│   │   ├── models.ts         # інтерфейси Product / OrderItem / Order
+│   │   ├── pagination.ts     # helper cursor-пагінації (непрозорий base64url(id))
+│   │   └── problem-json.filter.ts   # ExceptionFilter → problem+json
+│   ├── products/             # controller + service + module
+│   └── orders/               # controller + service + module (idempotency тут)
+├── package.json
+├── tsconfig.json
+├── README.md
+└── .gitignore                # node_modules/, dist/, spec.json, ...
 ```
-
-`spec.json` — це згенерований `redocly bundle` артефакт, тому він у `.gitignore`.
 
 ## Установка
 
@@ -53,56 +77,44 @@ npm install
 ## Запуск
 
 ```bash
-npm start        # node app.js       -> http://localhost:3000
-npm run dev      # nodemon app.js    -> те саме, з автоперезапуском
+npm start          # prestart зіб'є tsc → node dist/main.js  -> http://localhost:3000
+npm run build      # лише компіляція у dist/
+npm run start:dev  # node --watch dist/main.js (перезапуск на зміну зібраного коду)
 ```
 
-Доступні ендпойнти (in-memory дані): `GET /products`, `GET /products/{id}`,
+Ендпойнти (in-memory дані): `GET /products`, `GET /products/{id}`,
 `GET /orders`, `POST /orders`, `GET /orders/{id}`.
 
 ## Перевірки (acceptance criteria)
 
-Усі проходять **після чистого `npm install`**, без ручних кроків.
+Спекові перевірки (1–5) — незмінні, бо `openapi.yaml` той самий.
 
-### 1. Спека валідна (errors — ні; warnings можна)
+### 1. Спека валідна
 
 ```bash
-npm run lint:spec
-# або: npx @redocly/cli lint openapi/openapi.yaml   # exit code 0
+npm run lint:spec        # npx @redocly/cli lint openapi/openapi.yaml  -> exit 0
 ```
 
-### 2. Обсяг спеки (≥2 ресурси, ≥5 операцій, Idempotency-Key required з описом ≥40)
+### 2. Обсяг спеки (≥2 ресурси, ≥5 операцій, Idempotency-Key required, опис ≥40)
 
 ```bash
 npm run bundle:spec
-# або: npx @redocly/cli bundle openapi/openapi.yaml -o spec.json
 node -e "const s=require('./spec.json'),M=['get','post','put','patch','delete'];\
 const ops=Object.entries(s.paths).flatMap(([p,v])=>Object.keys(v).filter(m=>M.includes(m)).map(m=>[p,m]));\
 const idem=ops.flatMap(([p,m])=>s.paths[p][m].parameters??[]).find(x=>x.in==='header'&&/idempotency-key/i.test(x.name));\
 console.log('операцій:',ops.length,'· ресурсів:',new Set(Object.keys(s.paths).map(p=>p.split('/')[1])).size);\
 console.log('Idempotency-Key: required =',idem?.required,'· опис, символів =',(idem?.description??'').trim().length)"
-# очікуємо: операцій ≥ 5 · ресурсів ≥ 2 · required = true · опис ≥ 40
 ```
 
-### 3. Idempotency-Key задекларовано
+### 3–5. Idempotency-Key / cursor-пагінація / problem+json у контракті
 
 ```bash
-grep -c 'Idempotency-Key' openapi/openapi.yaml   # ≥ 1, і в POST це header required:true
+grep -c 'Idempotency-Key' openapi/openapi.yaml
+grep -c 'next_cursor' openapi/openapi.yaml
+grep -c 'application/problem+json' openapi/openapi.yaml
 ```
 
-### 4. Cursor-пагінація в контракті
-
-```bash
-grep -c 'next_cursor' openapi/openapi.yaml        # ≥ 1; спискова опер. має cursor+limit, items+next_cursor
-```
-
-### 5. problem+json скрізь у помилках
-
-```bash
-grep -c 'application/problem+json' openapi/openapi.yaml   # ≥ 2; у components.schemas є Problem
-```
-
-### 6. Варіант Б працює наживо
+### 6. Застосунок працює наживо
 
 Спочатку в одному терміналі:
 
@@ -126,23 +138,30 @@ curl -s -i -X POST http://localhost:3000/orders \
   -d '{"items":[]}'
 # detail: request/body/items must NOT have fewer than 1 items
 
-# 6c. Валідний запит -> 201 + Order
+# 6c. Валідний запит -> 201 + Order (total_cents: 5500)
 curl -s -i -X POST http://localhost:3000/orders \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: key-123' \
   -d '{"items":[{"product_id":"prod_1","quantity":2},{"product_id":"prod_3","quantity":1}]}'
-# 201; total_cents: 5500 (2×2600 + 1×300)
 ```
 
-## Що містить контракт
+### Додатково — повна семантика Idempotency-Key
 
-- **2 ресурси / 5 операцій:** `/products` (list + get), `/orders` (list + create + get).
-  Кожна операція має `operationId`, `summary` та описані відповіді, включно з помилками.
-- **Cursor-пагінація** на `GET /products` і `GET /orders`: query `limit` + `cursor`
-  (непрозорий токен), відповідь `{ items, next_cursor }`, де `next_cursor` **nullable**
-  (`null` = сторінок більше немає).
-- **Idempotency-Key** на `POST /orders`: header, `required: true`, опис із семантикою повтору.
-- **problem+json** — кожна 4xx віддає `application/problem+json` зі схемою `Problem`
-  (обовʼязкові поля: `type`, `title`, `status`, `detail`, `instance`).
-- **Гроші — цілі копійки:** `price_cents`, `unit_price_cents`, `total_cents` — `integer`,
-  не float і не рядок-decimal.
+```bash
+# повтор того самого ключа + тіла -> 201 + заголовок Idempotency-Replay: true
+curl -s -i -X POST http://localhost:3000/orders \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: key-123' \
+  -d '{"items":[{"product_id":"prod_1","quantity":2},{"product_id":"prod_3","quantity":1}]}' \
+  | grep -i idempotency-replay
+
+# той самий ключ з ІНШИМ тілом -> 422 problem+json
+curl -s -i -X POST http://localhost:3000/orders \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: key-123' \
+  -d '{"items":[{"product_id":"prod_2","quantity":1}]}'
+```
+
+## Що лишилось незмінним із контракту
+
+- **2 ресурси / 5 операцій**, cursor-пагінація (`limit`/`cursor`, `next_cursor` nullable),
+  `Idempotency-Key` (header, required), `problem+json` на кожній 4xx, гроші — `*_cents: integer`.
+- Уся ця частина живе у `openapi/openapi.yaml` — при порті на Nest спека не змінювалась.
