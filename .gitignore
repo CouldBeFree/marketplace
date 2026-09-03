@@ -14,6 +14,10 @@ npm-debug.log*
 # Env
 .env
 .env.*
+!.env.example
+
+# Секрети (файли-паролі) — ніколи в git і ніколи в образ
+secrets/
 
 # OS / editor
 .DS_Store

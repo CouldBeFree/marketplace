@@ -165,3 +165,98 @@ curl -s -i -X POST http://localhost:3000/orders \
 - **2 ресурси / 5 операцій**, cursor-пагінація (`limit`/`cursor`, `next_cursor` nullable),
   `Idempotency-Key` (header, required), `problem+json` на кожній 4xx, гроші — `*_cents: integer`.
 - Уся ця частина живе у `openapi/openapi.yaml` — при порті на Nest спека не змінювалась.
+
+---
+
+# Configuration (ДЗ №2 — конфіг і секрети)
+
+Ланцюжок конфігурації:
+
+```
+process.env → zod-схема (fail-fast) → ConfigService<Env, true> → код
+secrets/db_password → password: () => readFile() → pg.Pool → БД
+```
+
+Зіпсована змінна **вбиває процес на старті** зі зрозумілою помилкою, а не на першому
+запиті в проді. Жоден секрет не живе ані в git, ані в шарах docker-образу. Пароль БД
+можна **ротувати без рестарту** сервісу.
+
+## Змінні середовища
+
+Єдине джерело правди — zod-схема `src/config/env.schema.ts`. Контракт для людей —
+`.env.example` (у git; синхронність зі схемою стежить `npm run check:env`).
+
+| Змінна | Обовʼязкова | Дефолт | Призначення |
+|---|---|---|---|
+| `NODE_ENV` | ні | `development` | `development` \| `test` \| `production` |
+| `PORT` | ні | `3000` | порт HTTP-сервера (`z.coerce.number`) |
+| `DB_URL` | **так** | — | `postgres://user@host:port/db` **без пароля** |
+| `DB_PASSWORD_FILE` | ні | `secrets/db_password` | шлях до файла-секрета з паролем БД |
+
+> Пароля БД у env **немає навмисно** — він у файлі-секреті, який `pg.Pool` перечитує
+> на кожне нове зʼєднання. Це й уможливлює ротацію без рестарту.
+
+## Локальний запуск
+
+```bash
+# 1) Postgres у docker (роль marketplace + БД marketplace створює init.sql)
+docker compose up -d db
+
+# 2) файл-секрет (пароль має збігатися з init.sql)
+mkdir -p secrets && printf '%s' 'marketplace_dev_pw' > secrets/db_password
+
+# 3) конфіг зі зразка
+cp .env.example .env
+
+# 4) запуск (build + node dist/main.js; НЕ watch — щоб був чесний exit code)
+npm start
+```
+
+Перевірка живучості:
+
+```bash
+curl -s localhost:3000/health   # {"status":"ok","db":"up","uptime_seconds":...}
+```
+
+`npm run start:dev` — те саме, але з `node --watch` (для розробки, окремо від `start`).
+
+## Ротація пароля БД без рестарту
+
+```bash
+curl -s localhost:3000/health          # запамʼятай uptime_seconds
+bash rotate.sh                         # ALTER ROLE → оновити файл → terminate
+curl -s localhost:3000/health          # знову 200, uptime_seconds БІЛЬШИЙ
+```
+
+Що робить `rotate.sh` (порядок критичний):
+
+1. `ALTER ROLE marketplace WITH PASSWORD '<новий>'` — міняє пароль на сервері;
+2. **одразу** пише новий пароль у `secrets/db_password` — щоб нові зʼєднання брали його;
+3. `pg_terminate_backend(...)` — рве старі зʼєднання, і пул перепідключається вже з новим
+   секретом (`pool.on('error')` ловить розрив — процес **не падає**).
+
+`uptime` у `/health` після ротації більший — доказ, що процес не рестартував.
+
+> Після `docker compose down -v` том зникає, `init.sql` виконується знову і пароль ролі
+> повертається до `marketplace_dev_pw` — **поверни й файл-секрет** до цього значення,
+> інакше `password authentication failed`.
+
+## Секрети поза git і поза образом
+
+- `.env` і `secrets/` — у `.gitignore` (у git лежить лише `.env.example`).
+- `.dockerignore` не пускає `.env` та `secrets/` у контекст збірки; `Dockerfile`
+  не оголошує жодного `ENV` з паролем. Перевірка:
+
+```bash
+docker build -t myapp .
+docker run --rm myapp ls -a /app                 # є .env.example, немає .env і secrets/
+docker run --rm myapp sh -c 'cat /app/.env' 2>&1 # No such file or directory
+docker inspect --format '{{.Config.Env}}' myapp  # лише PATH/NODE_VERSION/YARN_VERSION
+docker history --no-trunc myapp | grep -i password  # порожньо
+```
+
+## Перевірка контракту .env.example
+
+```bash
+npm run check:env    # exit 0, якщо .env.example збігається зі схемою; exit 1, якщо відстав
+```
