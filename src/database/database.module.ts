@@ -7,9 +7,9 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { readFile } from 'fs/promises';
-import { resolve } from 'path';
 import { Pool } from 'pg';
 import { Env } from '../config/env.schema';
+import { resolveFromRoot } from '../config/paths';
 
 export const PG_POOL = 'PG_POOL';
 
@@ -20,7 +20,7 @@ export const poolProvider = {
   inject: [ConfigService],
   useFactory: (config: ConfigService<Env, true>): Pool => {
     const url = new URL(config.get('DB_URL', { infer: true }));
-    const passwordFile = resolve(config.get('DB_PASSWORD_FILE', { infer: true }));
+    const passwordFile = resolveFromRoot(config.get('DB_PASSWORD_FILE', { infer: true }));
 
     const pool = new Pool({
       host: url.hostname,
