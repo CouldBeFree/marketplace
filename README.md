@@ -186,12 +186,17 @@ secrets/db_password → password: () => readFile() → pg.Pool → БД
 Єдине джерело правди — zod-схема `src/config/env.schema.ts`. Контракт для людей —
 `.env.example` (у git; синхронність зі схемою стежить `npm run check:env`).
 
-| Змінна | Обовʼязкова | Дефолт | Призначення |
-|---|---|---|---|
-| `NODE_ENV` | ні | `development` | `development` \| `test` \| `production` |
-| `PORT` | ні | `3000` | порт HTTP-сервера (`z.coerce.number`) |
-| `DB_URL` | **так** | — | `postgres://user@host:port/db` **без пароля** |
-| `DB_PASSWORD_FILE` | ні | `secrets/db_password` | шлях до файла-секрета з паролем БД |
+| Змінна | Обовʼязкова | Дефолт | Джерело | Призначення |
+|---|---|---|---|---|
+| `NODE_ENV` | ні | `development` | `.env` | `development` \| `test` \| `production` |
+| `PORT` | ні | `3000` | `.env` | порт HTTP-сервера (`z.coerce.number`) |
+| `DB_URL` | **так** | — | **сховище** (`.env` / secret-файл, поза git) | `postgres://user@host:port/db` **без пароля** |
+| `DB_PASSWORD_FILE` | ні | `secrets/db_password` | `.env` | шлях до файла-секрета з паролем БД |
+
+> **Рядок підключення (`DB_URL`) живе у сховищі з ДЗ №11, а не в новому env-файлі.**
+> У git трекається лише `.env.example` (фейкові значення); реальний `DB_URL` — у `.env`,
+> який у `.gitignore`. Дев-креденшели самого контейнера Postgres (`postgres`/`postgres`)
+> — у `docker-compose.yml`: це окремий шлях для грейдера, не секрет застосунку.
 
 > Пароля БД у env **немає навмисно** — він у файлі-секреті, який `pg.Pool` перечитує
 > на кожне нове зʼєднання. Це й уможливлює ротацію без рестарту.
@@ -259,4 +264,74 @@ docker history --no-trunc myapp | grep -i password  # порожньо
 
 ```bash
 npm run check:env    # exit 0, якщо .env.example збігається зі схемою; exit 1, якщо відстав
+```
+
+---
+
+# Data layer (ДЗ №12 — схема, seed, індекси)
+
+Дата-шар домену Marketplace: 4 таблиці, реалістичний обсяг через `generate_series`,
+три повільні запити API та мінімальний набір індексів, що їх лікує. Докази —
+плани `EXPLAIN (ANALYZE, BUFFERS)` до/після в [`db/OPTIMIZATIONS.md`](db/OPTIMIZATIONS.md).
+
+**Головна таблиця — `orders`** (100 000 рядків у seed).
+
+Файли:
+
+| Файл | Призначення |
+|---|---|
+| `db/schema.sql` | 4 таблиці (`users`, `products`, `orders`, `order_items`) + 4 FOREIGN KEY + CHECK/NOT NULL |
+| `db/seed.sql` | генерація даних (перекошені розподіли) + `VACUUM (ANALYZE)` |
+| `db/queries/q1..q3.sql` | по одному запиту на файл (owner+період, рідкісний статус, `lower()`-пошук) |
+| `db/indexes.sql` | 3 індекси: composite, **partial**, **expression** |
+| `db/OPTIMIZATIONS.md` | 3 пари `EXPLAIN` до/після + пояснення |
+
+## Підняти Postgres (один рядок)
+
+```bash
+docker compose up -d --wait
+```
+
+> Створює БД `marketplace` через `init.sql`. Дев-креденшели — у `docker-compose.yml`
+> (`postgres`/`postgres`), тож на свіжому клоні пароль вгадувати не треба.
+> Порт хоста — `${DB_PORT:-5432}`; усі команди нижче йдуть через `docker compose exec`,
+> тож від порту не залежать.
+
+## Підключитись (один рядок)
+
+```bash
+docker compose exec -T db psql -U postgres -d marketplace -Atc "SELECT 1"   # -> 1
+```
+
+## Прогнати всі кроки
+
+Порядок критичний: `schema` → `seed` → EXPLAIN «до» (Seq Scan) → `indexes` →
+`ANALYZE` → EXPLAIN «після» (Index Scan).
+
+```bash
+# 1) схема (на чисту базу, без помилок)
+docker compose exec -T db psql -U postgres -d marketplace -v ON_ERROR_STOP=1 -f - < db/schema.sql
+
+# 2) дані: 100k+ рядків у orders + VACUUM (ANALYZE)
+docker compose exec -T db psql -U postgres -d marketplace -v ON_ERROR_STOP=1 -f - < db/seed.sql
+
+# 3) EXPLAIN «до» — кожен запит дає Seq Scan
+for q in db/queries/q1.sql db/queries/q2.sql db/queries/q3.sql; do
+  docker compose exec -T db psql -U postgres -d marketplace -c "EXPLAIN (ANALYZE, BUFFERS) $(cat $q)"
+done
+
+# 4) індекси + оновлення статистики
+docker compose exec -T db psql -U postgres -d marketplace -v ON_ERROR_STOP=1 -f - < db/indexes.sql
+docker compose exec -T db psql -U postgres -d marketplace -c "ANALYZE;"
+
+# 5) EXPLAIN «після» — Index/Bitmap Scan, Seq Scan зник
+for q in db/queries/q1.sql db/queries/q2.sql db/queries/q3.sql; do
+  docker compose exec -T db psql -U postgres -d marketplace -c "EXPLAIN (ANALYZE, BUFFERS) $(cat $q)"
+done
+```
+
+Скинути все начисто (новий том):
+
+```bash
+docker compose down -v && docker compose up -d --wait
 ```
