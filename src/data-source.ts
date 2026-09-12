@@ -17,4 +17,3 @@ export const AppDataSource = new DataSource({
   migrations: [__dirname + '/migrations/*.js'], // скомпільовані міграції з dist/
 });
 
-export default AppDataSource;
