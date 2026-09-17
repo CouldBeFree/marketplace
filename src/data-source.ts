@@ -4,6 +4,7 @@ import { User } from './entities/user.entity';
 import { Product } from './entities/product.entity';
 import { Order } from './entities/order.entity';
 import { OrderItem } from './entities/order-item.entity';
+import { Task } from './entities/task.entity';
 
 // Підключення приходить ВИКЛЮЧНО з оточення (process.env.DB_URL), яке наповнює
 // scripts/with-secrets.sh зі сховища ДЗ #11 (або грейдер через SKIP_VAULT=1).
@@ -13,7 +14,7 @@ export const AppDataSource = new DataSource({
   url: process.env.DB_URL,
   synchronize: false, // схему створюють міграції, не автосинк
   logging: false,
-  entities: [User, Product, Order, OrderItem],
+  entities: [User, Product, Order, OrderItem, Task],
   migrations: [__dirname + '/migrations/*.js'], // скомпільовані міграції з dist/
 });
 

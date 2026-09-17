@@ -37,6 +37,11 @@ const BUYERS = ['carol@shop.local', 'dave@shop.local', 'erin@shop.local', 'frank
 const STATUSES = ['completed', 'pending', 'paid', 'shipped', 'completed', 'cancelled'];
 const ORDER_COUNT = 12;
 
+// баланс покупців свідомо надлишковий — щоб у demo:race обмежував саме stock,
+// а не гроші; stock — стартовий залишок кожного товару (demo:race скидає свій до 10).
+const SEED_BALANCE_CENTS = 100_000_000; // 1 000 000.00 у копійках
+const SEED_STOCK = 100;
+
 async function main(): Promise<void> {
   await AppDataSource.initialize();
   const userRepo = AppDataSource.getRepository(User);
@@ -44,26 +49,26 @@ async function main(): Promise<void> {
   const orderRepo = AppDataSource.getRepository(Order);
   const itemRepo = AppDataSource.getRepository(OrderItem);
 
-  // ── users (find-or-create за email) ──
+  // ── users (find-or-create за email; balance проставляємо завжди — ідемпотентно) ──
   const usersByEmail = new Map<string, User>();
   for (const u of USERS) {
     let row = await userRepo.findOne({ where: { email: u.email } });
-    if (!row) row = await userRepo.save(userRepo.create(u));
+    if (!row) row = userRepo.create(u);
+    row.balanceCents = SEED_BALANCE_CENTS;
+    row = await userRepo.save(row);
     usersByEmail.set(u.email, row);
   }
 
-  // ── products (find-or-create за seller_id + title) ──
+  // ── products (find-or-create за seller_id + title; stock проставляємо завжди) ──
   const products: Product[] = [];
   for (const p of PRODUCTS) {
     const seller = usersByEmail.get(p.sellerEmail)!;
     let row = await productRepo.findOne({
       where: { sellerId: seller.id, title: p.title },
     });
-    if (!row) {
-      row = await productRepo.save(
-        productRepo.create({ title: p.title, priceCents: p.priceCents, seller }),
-      );
-    }
+    if (!row) row = productRepo.create({ title: p.title, priceCents: p.priceCents, seller });
+    row.stock = SEED_STOCK;
+    row = await productRepo.save(row);
     products.push(row);
   }
 
