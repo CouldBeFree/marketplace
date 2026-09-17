@@ -4,6 +4,9 @@ import { pool } from './db';
 // лічильнику → другий UPDATE дістає serialization failure (40001). Обгортка ловить
 // ЛИШЕ 40001/40P01 і повторює ВСЮ транзакцію (з читаннями) з backoff. Без retry був
 // би lost update (final = 1); з retry — арифметично коректний final = CONCURRENCY.
+//
+// Лічильник — це `stock` реального товару (не ad-hoc таблиця): скрипт нічого не
+// створює в схемі й нічого не лишає по собі; усі таблиці — лише з міграцій.
 const CONCURRENCY = 2;
 const MAX_ATTEMPTS = 50;
 
@@ -28,18 +31,18 @@ async function withRetry<T>(worker: number, fn: () => Promise<T>): Promise<T> {
   throw new Error(`worker ${worker}: вичерпано ${MAX_ATTEMPTS} спроб`);
 }
 
-// read-modify-write: читаємо значення, рахуємо +1 у JS, пишемо — під REPEATABLE READ.
-async function increment(): Promise<void> {
+// read-modify-write: читаємо stock, рахуємо +1 у JS, пишемо — під REPEATABLE READ.
+async function increment(productId: string): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
-    const { rows } = await client.query('SELECT value FROM demo_counter WHERE id = 1');
-    const current = Number(rows[0].value);
+    const { rows } = await client.query('SELECT stock FROM products WHERE id = $1', [productId]);
+    const current = Number(rows[0].stock);
     await new Promise((r) => setTimeout(r, 25)); // гарантуємо перекриття снапшотів
-    await client.query('UPDATE demo_counter SET value = $1 WHERE id = 1', [current + 1]);
+    await client.query('UPDATE products SET stock = $2 WHERE id = $1', [productId, current + 1]);
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {}); // не маскувати початкову помилку
     throw err; // назовні: withRetry вирішить, чи повторювати цілу транзакцію
   } finally {
     client.release();
@@ -47,25 +50,24 @@ async function increment(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  await pool.query(
-    `CREATE TABLE IF NOT EXISTS demo_counter (id int PRIMARY KEY, value int NOT NULL)`,
-  );
-  await pool.query(
-    `INSERT INTO demo_counter (id, value) VALUES (1, 0)
-     ON CONFLICT (id) DO UPDATE SET value = 0`,
-  );
+  // лічильник — stock першого товару; скидаємо до 0 (демо повторюване)
+  const { rows: p } = await pool.query('SELECT id FROM products ORDER BY id LIMIT 1');
+  const productId: string = p[0].id;
+  await pool.query('UPDATE products SET stock = 0 WHERE id = $1', [productId]);
 
   await Promise.all(
-    Array.from({ length: CONCURRENCY }, (_, i) => withRetry(i + 1, () => increment())),
+    Array.from({ length: CONCURRENCY }, (_, i) =>
+      withRetry(i + 1, () => increment(productId)),
+    ),
   );
 
-  const { rows } = await pool.query('SELECT value FROM demo_counter WHERE id = 1');
-  const final = Number(rows[0].value);
+  const { rows } = await pool.query('SELECT stock FROM products WHERE id = $1', [productId]);
+  const final = Number(rows[0].stock);
 
   console.log('');
   console.log(`конкурентних інкрементів:                 ${CONCURRENCY}`);
   console.log(`пійманих serialization failure (40001):   ${retries.length}`);
-  console.log(`фінальне значення лічильника:             ${final} (очікуване ${CONCURRENCY})`);
+  console.log(`фінальне значення лічильника (stock):     ${final} (очікуване ${CONCURRENCY})`);
 
   const ok = final === CONCURRENCY && retries.length >= 1;
   console.log(

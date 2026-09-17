@@ -8,7 +8,7 @@ export interface CheckoutInput {
 
 export type CheckoutResult =
   | { ok: true; orderId: string }
-  | { ok: false; reason: 'OUT_OF_STOCK' | 'INSUFFICIENT_FUNDS' };
+  | { ok: false; reason: 'OUT_OF_STOCK' | 'INSUFFICIENT_FUNDS' | 'INVALID_QUANTITY' };
 
 // Транзакційний checkout: усе в ОДНІЙ транзакції на ОДНОМУ клієнті пулу.
 // Захист від oversell — атомарний UPDATE ... WHERE stock >= $n RETURNING:
@@ -16,6 +16,13 @@ export type CheckoutResult =
 // Будь-яка невдача → ROLLBACK цілої транзакції: замовлень-сиріт не існує.
 export async function checkout(input: CheckoutInput): Promise<CheckoutResult> {
   const { buyerId, productId, quantity } = input;
+
+  // валідація вводу: quantity — ЦІЛЕ >= 1. Інакше, напр. -5, дало б stock - (-5)
+  // (поповнення складу) і замовлення з відʼємним total. Ловимо ДО відкриття транзакції.
+  if (!Number.isInteger(quantity) || quantity < 1) {
+    return { ok: false, reason: 'INVALID_QUANTITY' };
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -69,7 +76,8 @@ export async function checkout(input: CheckoutInput): Promise<CheckoutResult> {
     await client.query('COMMIT');
     return { ok: true, orderId };
   } catch (err) {
-    await client.query('ROLLBACK');
+    // не даємо ROLLBACK на мертвому зʼєднанні замаскувати початкову помилку
+    await client.query('ROLLBACK').catch(() => {});
     throw err;
   } finally {
     client.release();
