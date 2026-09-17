@@ -335,3 +335,127 @@ done
 ```bash
 docker compose down -v && docker compose up -d --wait
 ```
+
+---
+
+# ORM layer (ДЗ №13 — TypeORM, міграції, N+1)
+
+Схема з ДЗ №12 переїжджає в код на **TypeORM** по-продовому: entities + relations +
+**міграції без `synchronize`**. Плюс доводимо ціну ORM: знаходимо в домені **N+1**,
+показуємо його в лозі SQL і лікуємо; один агрегатний звіт — через **QueryBuilder**.
+
+| Файл | Призначення |
+|---|---|
+| `src/entities/*.entity.ts` | `User`, `Product`, `Order`, `OrderItem` — дзеркало схеми ДЗ №12 (гроші — integer-копійки) |
+| `src/data-source.ts` | `DataSource` із `synchronize: false`, підключення суто з `process.env.DB_URL` |
+| `src/migrations/*-Init.ts` | згенерована й дороблена руками початкова міграція |
+| `src/seed.ts` | детермінований **ідемпотентний** seed |
+| `src/demo-nplus1.ts` | N+1 «до/після» з лічильником запитів |
+| `src/report.ts` | звіт «виторг по продавцях» через `createQueryBuilder().getRawMany()` |
+| `scripts/with-secrets.sh` | обгортка «команда зі сховища» (наш аналог `infisical run`) |
+
+> **Гроші — `integer` у мінорних одиницях (копійки):** колонки `price_cents` / `total_cents` /
+> `unit_price_cents` — не float і не рядок-decimal (правило з ДЗ №1). Тому в `seed` `total`
+> рахується **цілим** додаванням, а агрегат `SUM(…_cents)` у `report` приходить рядком (bigint)
+> і друкується як є.
+
+> **Індекси на FK `order_items`** (`order_items_order_id_idx`, `order_items_product_id_idx`) —
+> Postgres не індексує FK-колонки автоматично; без них і наївний N+1-цикл, і join у `report`
+> ішли б `Seq Scan` по `order_items`.
+
+> **Збірка — `tsc`** (не esbuild): entities покладаються на метадані декораторів
+> (`emitDecoratorMetadata`), яких type-stripping/esbuild не емітять. CLI міграцій працює
+> зі **скомпільованим** DataSource (`dist/data-source.js`), тож після правок — `npm run build`.
+
+## Підключення — зі сховища (п.7), з аварійним входом для грейдера (п.8)
+
+Усі команди, що ходять у БД (`migrate*`, `seed`, `demo:nplus1`, `report`), загорнуті в
+`scripts/with-secrets.sh dev …`. Обгортка наповнює `DB_URL` зі сховища ДЗ №11
+(gitignored `.env` + `secrets/db_password`) — це основний, «прод-шейпнутий» шлях.
+
+Грейдер сховища не має, тож ходить аварійним входом: `SKIP_VAULT=1` змушує обгортку
+взяти `DB_URL` уже з оточення (як CI-runner підкладає секрети замість CLI сховища).
+У `src/data-source.ts` немає жодного зашитого хоста/пароля.
+
+## Grading
+
+Свіжий клон, чиста БД, без доступу до сховища. Виконати в корені репо:
+
+```bash
+docker compose up -d --wait
+export SKIP_VAULT=1                 # у грейдера немає доступу до сховища
+export DB_URL=postgres://marketplace:marketplace_dev_pw@127.0.0.1:5432/marketplace
+
+npm ci
+npm run build
+npm run migrate            # створює схему з нуля
+npm run migrate:show       # усі міграції як [X]
+npm run seed               # і ще раз — кількість рядків не зміниться
+npm run demo:nplus1        # друкує к-сть запитів «до» і «після»
+npm run report             # агрегований виторг по продавцях
+```
+
+> Дев-креденшели ролі `marketplace`/`marketplace_dev_pw` (їх створює `init.sql`) —
+> **не секрет**, як домовлено на ДЗ №11; тому їх можна тримати прямо тут.
+> Якщо порт 5432 на машині зайнятий — підніми на іншому (`DB_PORT=5441 docker compose
+> up -d --wait`) і став той самий порт у `DB_URL`.
+
+## Міграції (без `synchronize`)
+
+`synchronize: false` — схему створює **лише** міграція. Початкову згенеровано
+`migration:generate` проти порожньої БД, потім дороблено руками два індекси, яких
+декоратор не виражає: **`DESC`** у composite `orders_buyer_created_idx (buyer_id,
+created_at DESC)` та **expression** `orders_shipping_name_lower_idx (lower(shipping_name))`.
+`down()` реально відкочує (дропає FK/таблиці/індекси), тож цикл оборотний:
+
+```bash
+npm run migrate           # up
+npm run migrate:revert    # down — доменні таблиці зникають
+npm run migrate           # up знову
+```
+
+## Relations і вибір `onDelete`
+
+`order_items` несе дані на зв'язку M:N (кількість, ціна на момент), тому це **явна
+join-entity**, а не `@ManyToMany`. Для кожного FK — свідома стратегія:
+
+| Зв'язок | `onDelete` | Чому |
+|---|---|---|
+| `order_items.order_id → orders` | **CASCADE** | позиція не існує без замовлення — гине разом із ним |
+| `order_items.product_id → products` | **RESTRICT** | не дати видалити товар, поки він у чиємусь замовленні (історія) |
+| `products.seller_id → users` | **RESTRICT** | не дати видалити продавця з наявними товарами |
+| `orders.buyer_id → users` | **RESTRICT** | не дати видалити покупця з наявними замовленнями |
+
+## Seed — детермінований та ідемпотентний
+
+Природні ключі (`email`, `seller_id+title`, `shipping_name='SEED-ORDER-N'`) → повторний
+запуск нічого не дублює й не падає:
+
+```bash
+npm run seed && npm run seed
+docker compose exec -T db psql -U marketplace -d marketplace -Atc \
+  "SELECT 'users='||count(*) FROM users UNION ALL SELECT 'products='||count(*) FROM products \
+   UNION ALL SELECT 'orders='||count(*) FROM orders UNION ALL SELECT 'order_items='||count(*) FROM order_items"
+# users=6 · products=8 · orders=12 · order_items=24 — між запусками не змінюється
+```
+
+## N+1: доведено і вилікувано
+
+`npm run demo:nplus1` міряє граф **`order → items → product`** (2 рівні зв'язків, N = 12):
+
+| Стратегія | Запитів | Коментар |
+|---|---|---|
+| наївно (запит у циклі) | **37** | `= 1 + N + позиції` — росте з N |
+| `relations` / `leftJoinAndSelect` (join) | **1** | константа, не залежить від N |
+| `relationLoadStrategy: 'query'` | **4** | теж константа, `≤ 1 + 2×рівнів = 5` |
+
+Незалежність від N: та сама join-стратегія на меншій вибірці (3 замовлення) — теж **1**
+запит. Тобто «після» — мала константа, що не росте з розміром колекції.
+
+## Repository vs QueryBuilder
+
+Межа проста: **Repository** (`find`/`save`) — коли результат лягає в entity-обʼєкти:
+CRUD і завантаження графа зв'язків через `relations`. **QueryBuilder + `getRawMany()`** —
+коли потрібен агрегат / `GROUP BY` / обчислені колонки, яких немає в entity (виторг,
+лічильники): результат не мапиться на рядок таблиці, тож `find()` тут безсилий. Саме тому
+`report.ts` — на QueryBuilder, а seed і N+1-демо — на репозиторіях.
