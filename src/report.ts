@@ -18,21 +18,22 @@ async function main(): Promise<void> {
     .addSelect('s.fullName', 'seller_name')
     .addSelect('COUNT(DISTINCT o.id)', 'orders')
     .addSelect('SUM(oi.quantity)', 'units')
-    .addSelect('SUM(oi.unitPrice * oi.quantity)', 'revenue')
+    .addSelect('SUM(oi.unitPriceCents * oi.quantity)', 'revenue_cents')
     .groupBy('s.id')
     .addGroupBy('s.fullName')
-    .orderBy('revenue', 'DESC')
+    .orderBy('revenue_cents', 'DESC')
     .getRawMany();
 
-  // Агрегати приходять РЯДКАМИ (numeric/bigint), тож друкуємо як є, не кастуючи в number.
-  console.log('Виторг по продавцях (без скасованих замовлень):');
+  // SUM(bigint) приходить РЯДКОМ (bigint у number може не влізти), тож друкуємо як є.
+  // revenue_cents — у мінорних одиницях (копійки).
+  console.log('Виторг по продавцях, копійки (без скасованих замовлень):');
   console.log('─'.repeat(64));
   console.log(
     'seller_id'.padEnd(10) +
       'seller_name'.padEnd(20) +
       'orders'.padEnd(9) +
       'units'.padEnd(8) +
-      'revenue',
+      'revenue_cents',
   );
   console.log('─'.repeat(64));
   for (const r of rows) {
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
         String(r.seller_name).padEnd(20) +
         String(r.orders).padEnd(9) +
         String(r.units).padEnd(8) +
-        String(r.revenue),
+        String(r.revenue_cents),
     );
   }
   console.log('─'.repeat(64));

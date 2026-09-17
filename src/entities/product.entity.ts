@@ -9,9 +9,9 @@ import {
 } from 'typeorm';
 import { User } from './user.entity';
 
-// products: id bigint IDENTITY PK, seller_id FK→users, title, price numeric(12,2), created_at
+// products: id bigint IDENTITY PK, seller_id FK→users, title, price_cents integer, created_at
 @Entity('products')
-@Check('CHK_products_price', '"price" >= 0')
+@Check('CHK_products_price_cents', '"price_cents" >= 0')
 export class Product {
   @PrimaryGeneratedColumn('identity', {
     type: 'bigint',
@@ -33,9 +33,9 @@ export class Product {
   @Column({ type: 'text' })
   title: string;
 
-  // гроші — numeric(12,2) (точний тип, не float; TypeORM віддає його рядком)
-  @Column({ type: 'numeric', precision: 12, scale: 2 })
-  price: string;
+  // гроші — integer у мінорних одиницях (копійки); не float і не рядок-decimal
+  @Column({ type: 'integer', name: 'price_cents' })
+  priceCents: number;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
