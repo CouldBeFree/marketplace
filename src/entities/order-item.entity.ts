@@ -4,19 +4,23 @@ import {
   Column,
   ManyToOne,
   JoinColumn,
+  Index,
   Check,
 } from 'typeorm';
 import { Order } from './order.entity';
 import { Product } from './product.entity';
 
 // order_items: id bigint IDENTITY PK, order_id FK→orders (CASCADE),
-//              product_id FK→products (RESTRICT), quantity int, unit_price numeric(12,2)
+//              product_id FK→products (RESTRICT), quantity int, unit_price_cents integer
 //
 // M:N між orders і products несе дані на зв'язку (кількість, ціна на момент),
 // тому це явна join-entity, а не @ManyToMany.
 @Entity('order_items')
 @Check('CHK_order_items_quantity', '"quantity" > 0')
-@Check('CHK_order_items_unit_price', '"unit_price" >= 0')
+@Check('CHK_order_items_unit_price_cents', '"unit_price_cents" >= 0')
+// індекси на FK-колонки: без них join у report і наївний цикл ідуть seq scan
+@Index('order_items_order_id_idx', ['orderId'])
+@Index('order_items_product_id_idx', ['productId'])
 export class OrderItem {
   @PrimaryGeneratedColumn('identity', {
     type: 'bigint',
@@ -49,6 +53,7 @@ export class OrderItem {
   @Column({ type: 'int' })
   quantity: number;
 
-  @Column({ type: 'numeric', precision: 12, scale: 2, name: 'unit_price' })
-  unitPrice: string;
+  // гроші — integer у мінорних одиницях (копійки)
+  @Column({ type: 'integer', name: 'unit_price_cents' })
+  unitPriceCents: number;
 }

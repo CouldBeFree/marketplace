@@ -14,7 +14,7 @@ async function main(): Promise<void> {
   const productId: string = prod[0].id;
   const buyerId: string = buyer[0].id;
   await pool.query(`UPDATE products SET stock = $2 WHERE id = $1`, [productId, INITIAL_STOCK]);
-  await pool.query(`UPDATE users SET balance = 1000000 WHERE id = $1`, [buyerId]);
+  await pool.query(`UPDATE users SET balance_cents = 100000000 WHERE id = $1`, [buyerId]);
 
   // ── ATTEMPTS паралельних checkout, без черг у застосунку ──
   const results = await Promise.all(

@@ -24,21 +24,21 @@ export async function checkout(input: CheckoutInput): Promise<CheckoutResult> {
     const stockRes = await client.query(
       `UPDATE products SET stock = stock - $2
        WHERE id = $1 AND stock >= $2
-       RETURNING price`,
+       RETURNING price_cents`,
       [productId, quantity],
     );
     if (stockRes.rowCount === 0) {
       await client.query('ROLLBACK');
       return { ok: false, reason: 'OUT_OF_STOCK' };
     }
-    const unitPrice: string = stockRes.rows[0].price; // numeric → рядок
+    const unitPriceCents: number = stockRes.rows[0].price_cents; // integer копійки
 
-    // 2) списання балансу (арифметика в SQL → numeric лишається точним)
+    // 2) списання балансу в копійках (ціла арифметика, без float/numeric)
     const balRes = await client.query(
-      `UPDATE users SET balance = balance - ($2::numeric * $3::int)
-       WHERE id = $1 AND balance >= ($2::numeric * $3::int)
+      `UPDATE users SET balance_cents = balance_cents - ($2::int * $3::int)
+       WHERE id = $1 AND balance_cents >= ($2::int * $3::int)
        RETURNING id`,
-      [buyerId, unitPrice, quantity],
+      [buyerId, unitPriceCents, quantity],
     );
     if (balRes.rowCount === 0) {
       await client.query('ROLLBACK');
@@ -47,17 +47,17 @@ export async function checkout(input: CheckoutInput): Promise<CheckoutResult> {
 
     // 3) INSERT замовлення (+ позиція)
     const orderRes = await client.query(
-      `INSERT INTO orders (buyer_id, status, shipping_name, total)
-       VALUES ($1, 'paid', $2, ($3::numeric * $4::int))
+      `INSERT INTO orders (buyer_id, status, shipping_name, total_cents)
+       VALUES ($1, 'paid', $2, ($3::int * $4::int))
        RETURNING id`,
-      [buyerId, `checkout ${buyerId}`, unitPrice, quantity],
+      [buyerId, `checkout ${buyerId}`, unitPriceCents, quantity],
     );
     const orderId: string = orderRes.rows[0].id;
 
     await client.query(
-      `INSERT INTO order_items (order_id, product_id, quantity, unit_price)
+      `INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents)
        VALUES ($1, $2, $3, $4)`,
-      [orderId, productId, quantity, unitPrice],
+      [orderId, productId, quantity, unitPriceCents],
     );
 
     // 4) INSERT задача на post-processing (лист/чек — виконає воркер, п.3)

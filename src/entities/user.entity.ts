@@ -9,9 +9,9 @@ import {
 import { Product } from './product.entity';
 import { Order } from './order.entity';
 
-// users: id bigint IDENTITY PK, email UNIQUE, full_name, balance, created_at timestamptz
+// users: id bigint IDENTITY PK, email UNIQUE, full_name, balance_cents, created_at timestamptz
 @Entity('users')
-@Check('CHK_users_balance', '"balance" >= 0')
+@Check('CHK_users_balance_cents', '"balance_cents" >= 0')
 export class User {
   @PrimaryGeneratedColumn('identity', {
     type: 'bigint',
@@ -25,9 +25,9 @@ export class User {
   @Column({ type: 'text', name: 'full_name' })
   fullName: string;
 
-  // баланс покупця; списання при checkout — атомарний UPDATE ... WHERE balance >= $sum
-  @Column({ type: 'numeric', precision: 12, scale: 2, default: 0 })
-  balance: string;
+  // баланс покупця в копійках; списання при checkout — UPDATE ... WHERE balance_cents >= $sum
+  @Column({ type: 'integer', name: 'balance_cents', default: 0 })
+  balanceCents: number;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;

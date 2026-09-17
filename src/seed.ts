@@ -21,16 +21,16 @@ const USERS = [
   { email: 'frank@shop.local', fullName: 'Frank Buyer' },
 ];
 
-// price — рядок (numeric(12,2))
+// price_cents — integer у мінорних одиницях (копійки)
 const PRODUCTS = [
-  { sellerEmail: 'alice@shop.local', title: 'Keyboard', price: '49.99' },
-  { sellerEmail: 'alice@shop.local', title: 'Mouse', price: '19.50' },
-  { sellerEmail: 'alice@shop.local', title: 'Monitor', price: '199.00' },
-  { sellerEmail: 'alice@shop.local', title: 'Desk', price: '149.00' },
-  { sellerEmail: 'bob@shop.local', title: 'Laptop Stand', price: '39.99' },
-  { sellerEmail: 'bob@shop.local', title: 'USB-C Hub', price: '29.99' },
-  { sellerEmail: 'bob@shop.local', title: 'Webcam', price: '59.00' },
-  { sellerEmail: 'bob@shop.local', title: 'Headset', price: '89.90' },
+  { sellerEmail: 'alice@shop.local', title: 'Keyboard', priceCents: 4999 },
+  { sellerEmail: 'alice@shop.local', title: 'Mouse', priceCents: 1950 },
+  { sellerEmail: 'alice@shop.local', title: 'Monitor', priceCents: 19900 },
+  { sellerEmail: 'alice@shop.local', title: 'Desk', priceCents: 14900 },
+  { sellerEmail: 'bob@shop.local', title: 'Laptop Stand', priceCents: 3999 },
+  { sellerEmail: 'bob@shop.local', title: 'USB-C Hub', priceCents: 2999 },
+  { sellerEmail: 'bob@shop.local', title: 'Webcam', priceCents: 5900 },
+  { sellerEmail: 'bob@shop.local', title: 'Headset', priceCents: 8990 },
 ];
 
 const BUYERS = ['carol@shop.local', 'dave@shop.local', 'erin@shop.local', 'frank@shop.local'];
@@ -39,7 +39,7 @@ const ORDER_COUNT = 12;
 
 // баланс покупців свідомо надлишковий — щоб у demo:race обмежував саме stock,
 // а не гроші; stock — стартовий залишок кожного товару (demo:race скидає свій до 10).
-const SEED_BALANCE = '1000000.00';
+const SEED_BALANCE_CENTS = 100_000_000; // 1 000 000.00 у копійках
 const SEED_STOCK = 100;
 
 async function main(): Promise<void> {
@@ -54,7 +54,7 @@ async function main(): Promise<void> {
   for (const u of USERS) {
     let row = await userRepo.findOne({ where: { email: u.email } });
     if (!row) row = userRepo.create(u);
-    row.balance = SEED_BALANCE;
+    row.balanceCents = SEED_BALANCE_CENTS;
     row = await userRepo.save(row);
     usersByEmail.set(u.email, row);
   }
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
     let row = await productRepo.findOne({
       where: { sellerId: seller.id, title: p.title },
     });
-    if (!row) row = productRepo.create({ title: p.title, price: p.price, seller });
+    if (!row) row = productRepo.create({ title: p.title, priceCents: p.priceCents, seller });
     row.stock = SEED_STOCK;
     row = await productRepo.save(row);
     products.push(row);
@@ -89,17 +89,19 @@ async function main(): Promise<void> {
       picks.push({ product, quantity: 1 + ((n + i) % 3) });
     }
 
-    const total = picks
-      .reduce((sum, { product, quantity }) => sum + Number(product.price) * quantity, 0)
-      .toFixed(2);
+    // total у копійках — ЦІЛЕ додавання, без float-арифметики
+    const totalCents = picks.reduce(
+      (sum, { product, quantity }) => sum + product.priceCents * quantity,
+      0,
+    );
 
     const order = await orderRepo.save(
-      orderRepo.create({ buyer, status, shippingName, total }),
+      orderRepo.create({ buyer, status, shippingName, totalCents }),
     );
 
     for (const { product, quantity } of picks) {
       await itemRepo.save(
-        itemRepo.create({ order, product, quantity, unitPrice: product.price }),
+        itemRepo.create({ order, product, quantity, unitPriceCents: product.priceCents }),
       );
     }
   }

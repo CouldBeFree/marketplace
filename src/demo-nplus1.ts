@@ -1,9 +1,9 @@
 import 'reflect-metadata';
-import { DataSource, Logger, QueryRunner } from 'typeorm';
-import { User } from './entities/user.entity';
-import { Product } from './entities/product.entity';
+import { Logger, QueryRunner } from 'typeorm';
+import { AppDataSource } from './data-source';
 import { Order } from './entities/order.entity';
 import { OrderItem } from './entities/order-item.entity';
+import { Product } from './entities/product.entity';
 
 // N+1 не видно в коді — лише в лозі SQL. Найпростіший лічильник: власний Logger,
 // що інкрементить count на кожен logQuery (кожен logQuery = один рейс у БД).
@@ -24,19 +24,14 @@ class QueryCountLogger implements Logger {
 
 async function main(): Promise<void> {
   const logger = new QueryCountLogger();
-  const ds = new DataSource({
-    type: 'postgres',
-    url: process.env.DB_URL,
-    synchronize: false,
-    entities: [User, Product, Order, OrderItem],
-    logging: ['query'],
-    logger,
-  });
-  await ds.initialize();
+  // Беремо СПІЛЬНИЙ AppDataSource (той самий конфіг підключення й entities) і лише
+  // підмінюємо logger — щоб не дублювати конфіг з data-source.ts.
+  AppDataSource.setOptions({ logging: ['query'], logger });
+  await AppDataSource.initialize();
 
-  const orderRepo = ds.getRepository(Order);
-  const itemRepo = ds.getRepository(OrderItem);
-  const productRepo = ds.getRepository(Product);
+  const orderRepo = AppDataSource.getRepository(Order);
+  const itemRepo = AppDataSource.getRepository(OrderItem);
+  const productRepo = AppDataSource.getRepository(Product);
 
   // ── ДО: наївно — запит на кожен рівень у циклі (класичний N+1) ──
   logger.reset();
@@ -83,10 +78,11 @@ async function main(): Promise<void> {
   console.log(`Незалежність від N: join на ${subset.length} замовл. (менша вибірка) = ${joinSubset} запит(и) — те саме число.`);
   console.log('─'.repeat(60));
 
-  await ds.destroy();
+  await AppDataSource.destroy();
 }
 
 main().catch(async (err) => {
   console.error('demo:nplus1 FAILED:', err);
+  if (AppDataSource.isInitialized) await AppDataSource.destroy();
   process.exit(1);
 });

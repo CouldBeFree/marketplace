@@ -346,7 +346,7 @@ docker compose down -v && docker compose up -d --wait
 
 | Файл | Призначення |
 |---|---|
-| `src/entities/*.entity.ts` | `User`, `Product`, `Order`, `OrderItem` — дзеркало схеми ДЗ №12 |
+| `src/entities/*.entity.ts` | `User`, `Product`, `Order`, `OrderItem` — дзеркало схеми ДЗ №12 (гроші — integer-копійки) |
 | `src/data-source.ts` | `DataSource` із `synchronize: false`, підключення суто з `process.env.DB_URL` |
 | `src/migrations/*-Init.ts` | згенерована й дороблена руками початкова міграція |
 | `src/seed.ts` | детермінований **ідемпотентний** seed |
@@ -354,8 +354,14 @@ docker compose down -v && docker compose up -d --wait
 | `src/report.ts` | звіт «виторг по продавцях» через `createQueryBuilder().getRawMany()` |
 | `scripts/with-secrets.sh` | обгортка «команда зі сховища» (наш аналог `infisical run`) |
 
-> **Гроші — `numeric(12,2)`** (точний тип, не float), як у схемі ДЗ №12. TypeORM віддає
-> `numeric` **рядком** — тому в `report`/`seed` значення не кастуються в `number` наосліп.
+> **Гроші — `integer` у мінорних одиницях (копійки):** колонки `price_cents` / `total_cents` /
+> `unit_price_cents` — не float і не рядок-decimal (правило з ДЗ №1). Тому в `seed` `total`
+> рахується **цілим** додаванням, а агрегат `SUM(…_cents)` у `report` приходить рядком (bigint)
+> і друкується як є.
+
+> **Індекси на FK `order_items`** (`order_items_order_id_idx`, `order_items_product_id_idx`) —
+> Postgres не індексує FK-колонки автоматично; без них і наївний N+1-цикл, і join у `report`
+> ішли б `Seq Scan` по `order_items`.
 
 > **Збірка — `tsc`** (не esbuild): entities покладаються на метадані декораторів
 > (`emitDecoratorMetadata`), яких type-stripping/esbuild не емітять. CLI міграцій працює
@@ -464,7 +470,7 @@ CRUD і завантаження графа зв'язків через `relation
 # Concurrency (ДЗ №14 — checkout, гонки, воркери, retry)
 
 Транзакційний checkout і три демо конкурентності поверх схеми ДЗ #13. Нова міграція
-додала `products.stock`, `users.balance` і таблицю черги `tasks` (усе без `synchronize`).
+додала `products.stock`, `users.balance_cents` і таблицю черги `tasks` (усе без `synchronize`).
 Демо ходять у БД через ту саму обгортку `scripts/with-secrets.sh` (див. `## Grading`).
 
 | Файл | Призначення |
@@ -473,7 +479,7 @@ CRUD і завантаження графа зв'язків через `relation
 | `src/demo-race.ts` | `npm run demo:race` — 50 паралельних checkout на товар зі stock=10 |
 | `src/demo-workers.ts` | `npm run demo:workers` — пул воркерів через `FOR UPDATE SKIP LOCKED` |
 | `src/demo-retry.ts` | `npm run demo:retry` — serialization failure під `REPEATABLE READ` + retry |
-| `src/migrations/…-Concurrency.ts` | `stock` + `balance` + таблиця `tasks` |
+| `src/migrations/…-Concurrency.ts` | `stock` + `balance_cents` + таблиця `tasks` |
 
 ## Числа з моїх запусків
 

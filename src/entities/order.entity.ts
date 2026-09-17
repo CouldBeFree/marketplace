@@ -13,9 +13,9 @@ import { User } from './user.entity';
 import { OrderItem } from './order-item.entity';
 
 // orders: id bigint IDENTITY PK, buyer_id FK→users, status, shipping_name,
-//         total numeric(12,2), created_at
+//         total_cents integer, created_at
 @Entity('orders')
-@Check('CHK_orders_total', '"total" >= 0')
+@Check('CHK_orders_total_cents', '"total_cents" >= 0')
 @Check(
   'CHK_orders_status',
   `"status" IN ('pending','paid','shipped','completed','cancelled')`,
@@ -50,8 +50,9 @@ export class Order {
   @Column({ type: 'text', name: 'shipping_name' })
   shippingName: string;
 
-  @Column({ type: 'numeric', precision: 12, scale: 2 })
-  total: string;
+  // гроші — integer у мінорних одиницях (копійки)
+  @Column({ type: 'integer', name: 'total_cents' })
+  totalCents: number;
 
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt: Date;
