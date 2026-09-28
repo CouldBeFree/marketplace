@@ -15,5 +15,24 @@ services:
       timeout: 3s
       retries: 10
 
+  # Пулер з'єднань перед Postgres. Застосунок ходить у базу ЧЕРЕЗ нього
+  # (DB_URL → pgbouncer), а не напряму. Конфіг — у репо (pgbouncer/*).
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    ports:
+      # опублікований на хост — грейдер ходить із хоста, не з мережі compose
+      - '${PGBOUNCER_PORT:-6432}:6432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 6432 -U marketplace -d marketplace || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
 volumes:
   pgdata:

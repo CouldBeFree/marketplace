@@ -55,4 +55,7 @@ export DB_URL="$(DB_URL="${DB_URL:?DB_URL відсутній у .env}" DB_PW="$D
   process.stdout.write(u.toString());
 ')"
 
+# псевдонім для ops-скриптів (backup/restore-drill читають DATABASE_URL)
+export DATABASE_URL="$DB_URL"
+
 exec "$@"

@@ -1,0 +1,41 @@
+# Restore drill — протокол
+
+Доказ, що бекап курсової БД **реально відновлюється** (не «є файл», а «дані повертаються»).
+Прогнано скриптом [`scripts/restore-drill.sh`](scripts/restore-drill.sh): останній дамп →
+чистий ефемерний `postgres:16` контейнер (порожній volume, окремий порт) →
+`pg_restore --no-owner` → порівняння контрольної суми ключової таблиці `orders` до/після.
+
+Контрольна сума — одна команда: `SELECT count(*) || '|' || sum(total_cents) FROM orders`.
+
+## Результат прогону
+
+| Параметр | Значення |
+|---|---|
+| Дата drill-у | **2026-09-18** |
+| Дамп | `backups/marketplace-2026-09-18_114722.dump` |
+| Розмір дампу | **16 606 байт** (~20 KB) |
+| Контрольна сума ДЖЕРЕЛА | `12` рядків, `sum(total_cents) = 451740` |
+| Контрольна сума ВІДНОВЛЕНОГО | `12` рядків, `sum(total_cents) = 451740` |
+| Вердикт | **MATCH** (exit 0), повторний запуск — теж MATCH |
+
+## RTO / RPO
+
+- **RTO (Recovery Time Objective) ≈ 2.4 секунди** (2400 мс). Виміряно як **повний цикл
+  відновлення**: підняти чистий `postgres:16` контейнер + `createdb` + `pg_restore`. З них
+  сам `pg_restore` — **~0.1 секунди** (100 мс); решта ~2.3 с — старт свіжого Postgres.
+  На цьому seed-обсязі число мале; на проді RTO росте з розміром дампу, але лишається
+  прогнозованим (лінійно від обсягу).
+- **RPO (Recovery Point Objective) = до 24 годин.** Бекап іде **щоночі**
+  ([`backup.cron`](backup.cron), розклад `30 2 * * *`), тож у найгіршому випадку між останнім
+  нічним дампом і збоєм втрачається **до 24 год** змін. Зменшити RPO — частіший розклад
+  (напр. щогодини → RPO ≤ 1 год) або WAL-архівація/PITR (RPO → секунди).
+
+## Як відтворити
+
+```bash
+docker compose up -d --wait
+export DATABASE_URL=postgres://marketplace:marketplace_dev_pw@127.0.0.1:6432/marketplace
+export SKIP_VAULT=1
+bash scripts/with-secrets.sh dev bash scripts/backup.sh         # створює датований дамп
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh  # → друкує MATCH, exit 0
+```
