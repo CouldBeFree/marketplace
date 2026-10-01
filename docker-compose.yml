@@ -34,5 +34,36 @@ services:
       timeout: 3s
       retries: 15
 
+  # Backing-store брокера контрактів (ізольований від курсової БД).
+  pactbroker-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pactbroker
+      POSTGRES_PASSWORD: pactbroker
+      POSTGRES_DB: pactbroker
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U pactbroker']
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  # Pact Broker: зберігає контракти, результати верифікації і відповідає can-i-deploy.
+  pact-broker:
+    image: pactfoundation/pact-broker:latest
+    depends_on:
+      pactbroker-db:
+        condition: service_healthy
+    environment:
+      PACT_BROKER_DATABASE_URL: postgres://pactbroker:pactbroker@pactbroker-db:5432/pactbroker
+      PACT_BROKER_PORT: '9292'
+    ports:
+      - '${PACT_BROKER_PORT:-9292}:9292'
+    healthcheck:
+      # 127.0.0.1, НЕ localhost: puma всередині слухає лише IPv4
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:9292/diagnostic/status/heartbeat || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
 volumes:
   pgdata:
