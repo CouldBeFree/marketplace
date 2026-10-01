@@ -50,7 +50,10 @@ describe('contract: provider verification (marketplace-api)', () => {
     if (brokerUrl) {
       // шлях через брокер: тягнемо контракт і ПУБЛІКУЄМО результат верифікації
       opts.pactBrokerUrl = brokerUrl;
-      opts.pactBrokerToken = process.env.PACT_BROKER_TOKEN;
+      // токен виставляємо ЛИШЕ коли він є (локальний compose-брокер — без авторизації)
+      if (process.env.PACT_BROKER_TOKEN) {
+        opts.pactBrokerToken = process.env.PACT_BROKER_TOKEN;
+      }
       opts.publishVerificationResult = true;
       opts.consumerVersionSelectors = [{ latest: true }];
     } else {

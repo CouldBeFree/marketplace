@@ -573,3 +573,73 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh  # останні
 
 Тому адмін-операції (складні міграції розширень тощо) у проді ведуть **повз** пулер, напряму
 в Postgres.
+
+---
+
+# Тестування (ДЗ №16 — integration + E2E + Pact + CI)
+
+«Драбинка довіри» для домену: integration-тести проти **справжнього** Postgres у
+testcontainers, E2E через supertest і контракт через **Pact** з брокером і `can-i-deploy`.
+
+> **Де що покрито:** HTTP-застосунок Nest лишається **in-memory** (як у ДЗ #9). Справжню
+> БД по-справжньому покриває **integration-suite** (репозиторії проти testcontainers-Postgres);
+> E2E/Pact ганяють повний Nest із testcontainer-Postgres, під'єднаним через env.
+> Збірка тестів — `ts-jest` (esbuild не емітить метадані декораторів); `maxWorkers: 1`
+> (кожен воркер множить контейнери); `reporters: ['default']` (інакше Jest 30 у частині
+> середовищ ховає `PASS`/назви тестів).
+
+| Команда | Що робить |
+|---|---|
+| `npm run test:integration` | репо проти `postgres:16-alpine` (testcontainers): UNIQUE/FK/JOIN+GROUP BY |
+| `npm run test:e2e` | повний Nest через supertest: happy (створити→прочитати) + негатив 404/400 |
+| `npm run test:contract` | consumer-тест → `pacts/marketplace-web-marketplace-api.json` |
+| `npm run verify:provider` | підняти реальний застосунок і верифікувати контракт |
+
+## Стратегія ізоляції — транзакція-ROLLBACK
+
+Кожен integration-тест виконується в транзакції, яку `withRollback` **завжди відкочує**
+(`BEGIN … ROLLBACK`). Схему створюють міграції один раз у `globalSetup`, а дані кожного тесту
+зникають на `ROLLBACK` — тож тести не бачать одне одного й **повторний прогін suite поспіль
+зелений без ручної чистки**. Це дешевше за `TRUNCATE` між тестами й за контейнер-на-файл.
+
+## Брокер контрактів локально + гейт can-i-deploy
+
+```bash
+docker compose up -d --wait                       # серед сервісів — pact-broker (127.0.0.1:9292)
+export PACT_BROKER_URL=http://127.0.0.1:9292
+# publish контракту
+curl -X PUT "$PACT_BROKER_URL/pacts/provider/marketplace-api/consumer/marketplace-web/version/1.0.0" \
+  -H 'Content-Type: application/json' -d @pacts/marketplace-web-marketplace-api.json   # → 201
+# верифікація провайдера з публікацією результату
+PROVIDER_VERSION=1.0.0 bash scripts/with-secrets.sh dev npm run verify:provider        # → exit 0
+#   (аварійна форма для грейдера: PACT_BROKER_URL=… SKIP_VAULT=1 npm run verify:provider)
+```
+
+Доказ, що гейт **справжній** (а не завжди-зелений) — can-i-deploy ДО і ПІСЛЯ тега prod:
+
+```jsonc
+// ДО тега: can-i-deploy ... to=prod  — немає prod-версії провайдера
+{"deployable":null,"reason":"There is no verified pact between version 1.0.0 of marketplace-web and the latest version of marketplace-api with tag prod (no such version exists)","success":0,"failed":0,"unknown":1}
+
+// curl -X PUT "$PACT_BROKER_URL/pacticipants/marketplace-api/versions/1.0.0/tags/prod"  → 201
+
+// ПІСЛЯ тега: той самий can-i-deploy
+{"deployable":true,"reason":"All required verification results are published and successful","success":1,"failed":0,"unknown":0}
+```
+
+У CI те саме робить job `contract` ([`.github/workflows/contract.yml`](.github/workflows/contract.yml)):
+publish → `verify:provider` (`publishVerificationResult`) → `can-i-deploy`, який **валить джобу**,
+якщо `deployable` не `true`.
+
+## Секрети брокера
+
+`PACT_BROKER_URL`/`PACT_BROKER_TOKEN` код читає **лише** з `process.env`: локально їх підкладає
+обгортка `scripts/with-secrets.sh` зі сховища ДЗ #11, у CI — `secrets` GitHub. У репо токена
+немає; локальний дефолт `http://127.0.0.1:9292` — це адреса власного compose-брокера, не секрет.
+`DATABASE_URL` у тестах — окремий випадок: його видає testcontainer у рантаймі
+(`container.getConnectionUri()`), сховища він не потребує.
+
+## Контракт у git
+
+`pacts/*.json` закомічено (грейдер бачить контракт одразу, без запуску consumer-тесту).
+Регенерується `npm run test:contract`.

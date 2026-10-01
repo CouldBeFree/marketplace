@@ -1,0 +1,51 @@
+name: contract
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    env:
+      # Адреса й токен брокера — зі секретів (локальний compose-брокер відповідає
+      # на 127.0.0.1:9292 без токена; у проді токен приїжджає з secrets GitHub).
+      PACT_BROKER_URL: http://127.0.0.1:9292
+      PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      CONSUMER_VERSION: ${{ github.sha }}
+      PROVIDER_VERSION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+
+      - name: Підняти Pact Broker
+        run: docker compose up -d --wait pactbroker-db pact-broker
+
+      - name: Згенерувати контракт (consumer)
+        run: npm run test:contract
+
+      - name: Publish контракту в брокер
+        run: |
+          curl -sS -X PUT \
+            "$PACT_BROKER_URL/pacts/provider/marketplace-api/consumer/marketplace-web/version/$CONSUMER_VERSION" \
+            -H 'Content-Type: application/json' \
+            -d @pacts/marketplace-web-marketplace-api.json \
+            -o /dev/null -w 'publish http: %{http_code}\n'
+
+      - name: Provider verification (+ publish result)
+        run: npm run verify:provider
+
+      - name: can-i-deploy (гейт перед prod)
+        run: |
+          RESP="$(curl -sS "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$CONSUMER_VERSION&to=prod")"
+          echo "$RESP"
+          DEPLOYABLE="$(echo "$RESP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["summary"]["deployable"])')"
+          if [ "$DEPLOYABLE" != "True" ]; then
+            echo "can-i-deploy: деплой у prod ЗАБЛОКОВАНО (deployable=$DEPLOYABLE) — гейт тримає"
+            exit 1
+          fi
+          echo "can-i-deploy: OK — можна деплоїти в prod"
