@@ -12,6 +12,10 @@ module.exports = {
   globalSetup: '<rootDir>/test/integration/testkit/global-setup.ts',
   globalTeardown: '<rootDir>/test/integration/testkit/global-teardown.ts',
 
+  // Виставити DB_URL із testcontainer ДО завантаження AppModule (ConfigModule валідить
+  // env на forRoot(), тобто на import) — інакше E2E/provider падають без локального .env.
+  setupFiles: ['<rootDir>/test/setup-env.ts'],
+
   // Фіксований репортер: інакше Jest 30 у частині середовищ (detectAgent) вмикає
   // компактний 'agent'-репортер без PASS/назв/✓ — і решту критеріїв ніхто не побачить.
   reporters: ['default'],
