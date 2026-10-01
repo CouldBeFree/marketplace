@@ -1,0 +1,6 @@
+# backup.cron — щонічний бекап курсової БД.
+# Встановлення:  crontab backup.cron   (підстав свій шлях до репо в `cd`).
+#
+# Поля розкладу:  m  h  dom  mon  dow   command
+# Щоночі о 02:30. У проді креденшели бере обгортка зі сховища ДЗ #11 (slug prod).
+30 2 * * * cd /srv/marketplace && bash scripts/with-secrets.sh prod bash scripts/backup.sh >> /var/log/marketplace-backup.log 2>&1

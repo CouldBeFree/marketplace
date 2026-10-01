@@ -19,6 +19,9 @@ npm-debug.log*
 # Секрети (файли-паролі) — ніколи в git і ніколи в образ
 secrets/
 
+# Дампи бекапів — артефакти, не для git
+backups/
+
 # OS / editor
 .DS_Store
 Thumbs.db

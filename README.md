@@ -384,11 +384,13 @@ docker compose down -v && docker compose up -d --wait
 ```bash
 docker compose up -d --wait
 export SKIP_VAULT=1                 # у грейдера немає доступу до сховища
-export DB_URL=postgres://marketplace:marketplace_dev_pw@127.0.0.1:5432/marketplace
+# застосунок ходить ЧЕРЕЗ PgBouncer (порт 6432), а не напряму в Postgres
+export DB_URL=postgres://marketplace:marketplace_dev_pw@127.0.0.1:6432/marketplace
+export DATABASE_URL="$DB_URL"       # ops-скрипти (backup/restore-drill) читають DATABASE_URL
 
 npm ci
 npm run build
-npm run migrate            # створює схему з нуля
+npm run migrate            # створює схему з нуля (через PgBouncer)
 npm run migrate:show       # усі міграції як [X]
 npm run seed               # і ще раз — кількість рядків не зміниться
 npm run demo:nplus1        # друкує к-сть запитів «до» і «після»
@@ -398,12 +400,17 @@ npm run report             # агрегований виторг по прода
 npm run demo:race          # 50 паралельних checkout: успішних рівно 10, без oversell
 npm run demo:workers       # пул воркерів через SKIP LOCKED: кожна задача рівно раз
 npm run demo:retry         # serialization failure + retry: фінал арифметично коректний
+
+# ДЗ #15 — бекап і restore-drill (беруть DATABASE_URL; pg_dump іде крізь PgBouncer)
+bash scripts/with-secrets.sh dev bash scripts/backup.sh         # датований -Fc дамп у backups/
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh  # відновлює у чистий контейнер → MATCH
 ```
 
 > Дев-креденшели ролі `marketplace`/`marketplace_dev_pw` (їх створює `init.sql`) —
 > **не секрет**, як домовлено на ДЗ №11; тому їх можна тримати прямо тут.
-> Якщо порт 5432 на машині зайнятий — підніми на іншому (`DB_PORT=5441 docker compose
-> up -d --wait`) і став той самий порт у `DB_URL`.
+> Порти: PgBouncer — `${PGBOUNCER_PORT:-6432}`, Postgres — `${DB_PORT:-5432}`. Якщо
+> котрийсь зайнятий, підніми на інших (`DB_PORT=5441 PGBOUNCER_PORT=6432 docker compose
+> up -d --wait`) і встав порт PgBouncer у `DB_URL`/`DATABASE_URL`.
 
 ## Міграції (без `synchronize`)
 
@@ -507,3 +514,62 @@ WHERE id = $id AND stock >= $n RETURNING`. Це **один** стейтмент,
 `CHECK`/FK — клас `23xxx`, недостатньо коштів, невалідний вхід): повтор нічого не змінить —
 лише зациклиться або сховає реальний баг. Тому обгортка `withRetry` пропускає рівно ці два
 коди, а решту прокидає далі.
+
+---
+
+# Data layer ops (ДЗ №15 — PgBouncer + бекап + restore-drill)
+
+Два прод-атрибути поверх схеми/транзакцій: **пулер з'єднань** перед Postgres і **бекап,
+у відновленні якого ми впевнені** (бо прогнали restore-drill).
+
+| Файл | Призначення |
+|---|---|
+| `pgbouncer/pgbouncer.ini` (+`userlist.txt`) | конфіг PgBouncer: `pool_mode=transaction`, пул, admin-консоль |
+| `docker-compose.yml` → `pgbouncer` | сервіс пулера, порт `6432` опублікований на хост |
+| `scripts/backup.sh` | `pg_dump -Fc` → датований файл у `backups/` |
+| `backup.cron` | щонічний розклад бекапу |
+| `scripts/restore-drill.sh` | відновлення останнього дампу в чистий контейнер + checksum |
+| `RESTORE-DRILL.md` | протокол drill-у: дата, розмір, RTO, RPO |
+
+## Підняти й підключитись через PgBouncer
+
+```bash
+docker compose up -d --wait
+psql -h 127.0.0.1 -p 6432 -U marketplace -d marketplace -c "SELECT 1"   # → 1 (через пулер)
+psql -h 127.0.0.1 -p 6432 -U marketplace -d pgbouncer -c "SHOW POOLS"   # marketplace: pool_mode=transaction
+```
+
+Застосунок (і `migrate`/`seed`/демо) ходять у базу через `DB_URL` → **PgBouncer:6432**,
+не напряму в Postgres:5432.
+
+## Бекап і відновлення
+
+```bash
+bash scripts/with-secrets.sh dev bash scripts/backup.sh         # датований -Fc дамп у backups/
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh  # останній дамп → чистий контейнер → MATCH
+```
+
+`backup.cron` (`30 2 * * *`) ставить це на щоніч. Дампи — у `backups/` (поза git). Числа
+останнього drill-у (розмір, RTO, RPO) — у [`RESTORE-DRILL.md`](RESTORE-DRILL.md).
+
+> `pg_dump`/`pg_restore` ідуть логікою самого `pg_dump` (у нашому `DATABASE_URL` це PgBouncer;
+> для `-Fc` single-connection дампу transaction mode не заважає). Відновлення drill-у — завжди
+> в **окремий** свіжий контейнер, ніколи не в живу базу.
+
+## Чому transaction mode і що він ламає
+
+`pool_mode=transaction` повертає серверне з'єднання в пул **після кожної транзакції**, тож
+100+ клієнтів мультиплексуються на кілька фізичних з'єднань — головний виграш пулера. Ціна —
+**session-level стан не переживає межу транзакції**. Що ламається (мінімум три речі):
+
+1. **Session-level prepared statements** — named prepared statement, підготовлений в одній
+   транзакції, у наступній летить на інше серверне з'єднання й зникає. Лікуємо
+   `max_prepared_statements = 200` (PgBouncer ≥1.21) — тому TypeORM/`pg` живуть через пул.
+2. **Session-стан**: `SET`/session-GUC, `TEMP`-таблиці, незакриті курсори — усе, що живе в
+   межах сесії, не гарантовано збережеться між транзакціями (сусідня транзакція може потрапити
+   на інше з'єднання).
+3. **`LISTEN`/`NOTIFY` і session-level advisory locks** — прив'язані до конкретного серверного
+   з'єднання, тож у transaction mode ненадійні.
+
+Тому адмін-операції (складні міграції розширень тощо) у проді ведуть **повз** пулер, напряму
+в Postgres.
