@@ -6,6 +6,7 @@ import {
 import { Order } from '../common/models';
 import { paginate } from '../common/pagination';
 import { ProductsService } from '../products/products.service';
+import { OrderEventsService } from './order-events.service';
 
 interface OrderCreateBody {
   items: { product_id: string; quantity: number }[];
@@ -22,8 +23,13 @@ export class OrdersService {
   private readonly orders: Order[] = [];
   private seq = 0;
   private readonly idempotencyStore = new Map<string, IdempotencyRecord>();
+  // власник замовлення (внутрішньо, НЕ у HTTP-відповіді — щоб не ламати контракт спеки)
+  private readonly owners = new Map<string, string>();
 
-  constructor(private readonly products: ProductsService) {}
+  constructor(
+    private readonly products: ProductsService,
+    private readonly events: OrderEventsService,
+  ) {}
 
   list(limit?: number, cursor?: string) {
     return paginate(this.orders, limit, cursor);
@@ -37,7 +43,11 @@ export class OrdersService {
     return order;
   }
 
-  create(key: string, body: OrderCreateBody): { order: Order; replay: boolean } {
+  create(
+    key: string,
+    body: OrderCreateBody,
+    ownerId: string,
+  ): { order: Order; replay: boolean } {
     const bodyKey = JSON.stringify(body);
     const saved = this.idempotencyStore.get(key);
     if (saved) {
@@ -74,7 +84,20 @@ export class OrdersService {
     };
 
     this.orders.push(order);
+    this.owners.set(order.id, ownerId || 'anonymous');
     this.idempotencyStore.set(key, { bodyKey, status: 201, response: order });
     return { order, replay: false };
+  }
+
+  ownerOf(id: string): string | undefined {
+    return this.owners.get(id);
+  }
+
+  // Зміна статусу → emit у шину (WS/SSE). Emit іде ЗВІДСИ (бізнес-логіка), не з контролера.
+  changeStatus(id: string, status: string): Order {
+    const order = this.get(id); // кидає 404, якщо немає
+    order.status = status;
+    this.events.publish(id, status);
+    return order;
   }
 }
