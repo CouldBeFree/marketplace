@@ -2,14 +2,11 @@ import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
-import express, { NextFunction, Request, Response } from 'express';
-import { middleware as openApiValidator } from 'express-openapi-validator';
 import { readFile } from 'fs/promises';
-import { join } from 'path';
 import { AppModule } from './app.module';
 import { Env } from './config/env.schema';
 import { resolveFromRoot } from './config/paths';
-import { ProblemJsonFilter } from './common/problem-json.filter';
+import { attachPreInit, attachPostInit } from './http/configure-app';
 
 async function assertPasswordFileReadable(config: ConfigService<Env, true>) {
   const passwordFile = resolveFromRoot(config.get('DB_PASSWORD_FILE', { infer: true }));
@@ -31,38 +28,10 @@ async function bootstrap() {
   });
   const config = app.get(ConfigService) as ConfigService<Env, true>;
   await assertPasswordFileReadable(config);
-  const instance = app.getHttpAdapter().getInstance();
 
-  instance.use(express.json());
-
-  instance.use(
-    openApiValidator({
-      apiSpec: join(__dirname, '..', 'openapi', 'openapi.yaml'),
-      validateRequests: true,
-      validateResponses: true,
-      ignorePaths: /^\/health/,
-    }),
-  );
-
-  app.useGlobalFilters(new ProblemJsonFilter());
-
+  attachPreInit(app);
   await app.init();
-  instance.use((err: any, req: Request, res: Response, next: NextFunction) => {
-    if (res.headersSent) {
-      return next(err);
-    }
-    const status = err?.status ?? err?.statusCode ?? 500;
-    res
-      .status(status)
-      .type('application/problem+json')
-      .json({
-        type: 'about:blank',
-        title: err?.name || (status === 500 ? 'Internal Server Error' : 'Error'),
-        status,
-        detail: err?.message || 'Unexpected error',
-        instance: req.originalUrl,
-      });
-  });
+  attachPostInit(app);
 
   const port = config.get('PORT', { infer: true });
   await app.listen(port);
