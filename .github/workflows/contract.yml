@@ -39,6 +39,14 @@ jobs:
       - name: Provider verification (+ publish result)
         run: npm run verify:provider
 
+      - name: Позначити версію провайдера розгорнутою в prod
+        # у реальному пайплайні це окремий deploy-job; тут — щоб гейт нижче мав prod-версію
+        # провайдера (без неї can-i-deploy чесно блокує — демо цього переходу є в README).
+        run: |
+          curl -sS -X PUT \
+            "$PACT_BROKER_URL/pacticipants/marketplace-api/versions/$PROVIDER_VERSION/tags/prod" \
+            -H 'Content-Type: application/json' -o /dev/null -w 'tag prod http: %{http_code}\n'
+
       - name: can-i-deploy (гейт перед prod)
         run: |
           RESP="$(curl -sS "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$CONSUMER_VERSION&to=prod")"
