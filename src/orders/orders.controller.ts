@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Headers,
   HttpCode,
@@ -52,14 +53,21 @@ export class OrdersController {
     return this.orders.changeStatus(id, body.status);
   }
 
-  // SSE-потік подій одного замовлення. Відкритий (грейдер курлить без авторизації).
+  // SSE-потік подій одного замовлення. Та сама перевірка власності, що й у WS-gateway:
+  // клієнт шле X-User-Id і бачить ЛИШЕ свої замовлення (чуже/анонімне → 403 problem+json).
   // Поле id: — номер події, що зростає; підтримує Last-Event-ID (реплей пропущеного з буфера).
   @Get(':id/events')
   sse(
     @Param('id') id: string,
+    @Headers('x-user-id') userId: string | undefined,
     @Headers('last-event-id') lastEventId: string | undefined,
     @Res() res: Response,
   ): void {
+    // Кидаємо ДО writeHead → глобальний ProblemJsonFilter віддасть 403 application/problem+json.
+    if (!userId || this.orders.ownerOf(id) !== userId) {
+      throw new ForbiddenException('not your order');
+    }
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -68,24 +76,44 @@ export class OrdersController {
     // темп реконекту клієнта (без цього дефолт кількасекундний — демо «висне»)
     res.write('retry: 1000\n\n');
 
+    const since = Number(lastEventId);
+    const hasSince = Number.isFinite(since) && since > 0;
+    let lastSentId = hasSince ? since : 0;
+
     const send = (e: OrderEvent): void => {
       res.write(
         `id: ${e.id}\n` +
           `event: order.status\n` +
           `data: ${JSON.stringify({ orderId: e.orderId, status: e.status, at: e.at })}\n\n`,
       );
+      lastSentId = e.id;
     };
 
-    // 1) реплей пропущеного за Last-Event-ID
-    const since = Number(lastEventId);
-    if (Number.isFinite(since) && since > 0) {
-      for (const e of this.events.replaySince(id, since)) {
-        send(e);
+    // Жива підписка — ПЕРШОЮ. Поки програємо реплей, нові події не шлемо одразу,
+    // а складаємо в чергу — інакше подія між реплеєм і subscribe губилась би.
+    let draining = true;
+    const queued: OrderEvent[] = [];
+    const sub = this.events.stream(id).subscribe((e) => {
+      if (draining) {
+        queued.push(e);
+        return;
+      }
+      if (e.id > lastSentId) send(e);
+    });
+
+    // Реплей пропущеного за Last-Event-ID (історичні події з буфера, у порядку id).
+    if (hasSince) {
+      for (const e of this.events.replaySince(id, lastSentId)) {
+        if (e.id > lastSentId) send(e);
       }
     }
 
-    // 2) жива підписка на нові події цього замовлення
-    const sub = this.events.stream(id).subscribe(send);
+    // Зливаємо події, що надійшли під час реплею; дедуп за id (що вже в буфері — не дублюємо).
+    draining = false;
+    for (const e of queued) {
+      if (e.id > lastSentId) send(e);
+    }
+
     res.on('close', () => {
       sub.unsubscribe();
       res.end();

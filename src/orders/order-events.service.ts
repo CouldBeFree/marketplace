@@ -8,6 +8,11 @@ export interface OrderEvent {
   at: string; // ISO-час
 }
 
+// Статуси, після яких замовлення більше не змінюється. Досягнувши такого, чистимо
+// per-order стан (seq/buffer), інакше мапи ростуть без межі з кожним замовленням.
+// `cancelled` — єдиний термінальний статус у контракті (Order.status), решта — на виріст.
+const TERMINAL_STATUSES = new Set(['cancelled', 'completed', 'delivered']);
+
 // ОДНА шина подій для двох транспортів (WS-gateway і SSE-контролер): Subject + буфер
 // останніх подій на кожне замовлення (для реплею пропущеного за Last-Event-ID).
 @Injectable()
@@ -28,7 +33,15 @@ export class OrderEventsService {
     if (buf.length > this.bufferSize) buf.shift();
     this.buffer.set(orderId, buf);
 
+    // Subject синхронний: живі підписники (SSE/WS) отримають подію ДО чистки нижче.
     this.subject.next(event);
+
+    // Термінальний статус → замовлення завершене, подальших подій не буде:
+    // звільняємо per-order стан, щоб мапи не накопичувались безмежно.
+    if (TERMINAL_STATUSES.has(status)) {
+      this.seq.delete(orderId);
+      this.buffer.delete(orderId);
+    }
     return event;
   }
 

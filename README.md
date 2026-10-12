@@ -655,9 +655,13 @@ publish → `verify:provider` (`publishVerificationResult`) → `can-i-deploy`, 
   `join {orderId}`; сервер кладе сокет у кімнату `orders:<id>` **лише якщо він власник**
   (аноніму/чужому — відмова). Зміна статусу емітить `order.status` **тільки в цю кімнату**.
 - **SSE** (`GET /orders/:id/events`, `text/event-stream`): ті самі події з полем `id:`;
-  реконект із `Last-Event-ID: N` → реплей пропущеного (`id > N`) з буфера.
+  доступ — **лише власнику** (header `X-User-Id`, та сама перевірка, що й у WS; чуже/анонімне → `403`
+  `application/problem+json`). Реконект із `Last-Event-ID: N` → реплей пропущеного (`id > N`) з буфера;
+  жива підписка відкривається **до** реплею, тож подія між реплеєм і підпискою не губиться.
 
 Emit іде з **бізнес-логіки** зміни статусу (`OrdersService.changeStatus` → шина), не з контролера.
+Per-order `seq`/`buffer` **очищаються на термінальному статусі** (`cancelled`/`completed`/`delivered`) —
+замовлення завершене, подальших подій не буде, тож мапи не ростуть без межі.
 
 ## Запуск і демо
 
@@ -670,6 +674,10 @@ npm start                 # → http://localhost:3000
 # демо ізоляції кімнат (в іншому терміналі)
 node scripts/realtime-demo.mjs              # A_RECEIVED=1  B_RECEIVED=0  exit=0
 node scripts/realtime-demo.mjs --same-room  # A_RECEIVED=1  B_RECEIVED=1  exit=0
+
+# SSE напряму — лише власник (header X-User-Id має збігатися з тим, хто створив замовлення)
+curl -sN -H 'X-User-Id: <owner>' http://localhost:3000/orders/<order_id>/events
+# без/з чужим X-User-Id → 403 application/problem+json
 ```
 
 Контрольний `--same-room` іде тим самим кодом (прапорець вирішує і кімнату другого клієнта,
