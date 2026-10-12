@@ -38,6 +38,71 @@
         },
         "status": 200
       }
+    },
+    {
+      "description": "a request to create an order for prod_1",
+      "providerStates": [
+        {
+          "name": "product prod_1 exists"
+        }
+      ],
+      "request": {
+        "body": {
+          "items": [
+            {
+              "product_id": "prod_1",
+              "quantity": 2
+            }
+          ]
+        },
+        "headers": {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "pact-create-1"
+        },
+        "method": "POST",
+        "path": "/orders"
+      },
+      "response": {
+        "body": {
+          "created_at": "2026-01-01T00:00:00.000Z",
+          "currency": "UAH",
+          "id": "order_1",
+          "items": [
+            {
+              "product_id": "prod_1",
+              "quantity": 2,
+              "unit_price_cents": 2600
+            }
+          ],
+          "status": "created",
+          "total_cents": 5200
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.items": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            }
+          }
+        },
+        "status": 201
+      }
     }
   ],
   "metadata": {

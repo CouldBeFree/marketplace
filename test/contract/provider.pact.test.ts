@@ -5,6 +5,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { Verifier, VerifierOptions } from '@pact-foundation/pact';
 import { AppModule } from '../../src/app.module';
 import { attachPreInit, attachPostInit } from '../../src/http/configure-app';
+import { ProductsService } from '../../src/products/products.service';
 import { testDbUrl } from '../integration/testkit/db';
 
 const PROVIDER = 'marketplace-api';
@@ -25,6 +26,9 @@ describe('contract: provider verification (marketplace-api)', () => {
     attachPreInit(app);
     await app.init();
     attachPostInit(app);
+    // Порожній каталог: товар під стан поставить ВИКЛЮЧНО stateHandler (див. нижче),
+    // тож верифікація не тримається на дефолтному масиві ProductsService.
+    app.get(ProductsService).reset([]);
     await app.listen(PORT);
   });
 
@@ -39,11 +43,18 @@ describe('contract: provider verification (marketplace-api)', () => {
       provider: PROVIDER,
       providerBaseUrl: `http://127.0.0.1:${PORT}`,
       providerVersion: PROVIDER_VERSION,
-      // stateHandlers сідять потрібний стан під кожен provider state.
-      // prod_1 завжди є в in-memory ProductsService → стан уже виконано.
+      // stateHandlers РЕАЛЬНО сідять стан у стор, який читає провайдер (in-memory):
+      // каталог стартував порожнім, тож без цього сіду GET /products/prod_1 дав би 404
+      // і верифікація впала б — стан справді щось встановлює, а не покладається на дефолт.
       stateHandlers: {
-        // prod_1 завжди є в in-memory ProductsService → стан уже виконано (no-op)
-        'product prod_1 exists': async (): Promise<void> => undefined,
+        'product prod_1 exists': async (): Promise<void> => {
+          app.get(ProductsService).seedIfAbsent({
+            id: 'prod_1',
+            name: 'Кавоварка',
+            price_cents: 2600,
+            currency: 'UAH',
+          });
+        },
       },
     };
 

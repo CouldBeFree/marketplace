@@ -592,8 +592,8 @@ testcontainers, E2E через supertest і контракт через **Pact**
 |---|---|
 | `npm run test:integration` | репо проти `postgres:16-alpine` (testcontainers): UNIQUE/FK/JOIN+GROUP BY |
 | `npm run test:e2e` | повний Nest через supertest: happy (створити→прочитати) + негатив 404/400 |
-| `npm run test:contract` | consumer-тест → `pacts/marketplace-web-marketplace-api.json` |
-| `npm run verify:provider` | підняти реальний застосунок і верифікувати контракт |
+| `npm run test:contract` | consumer-тести (GET /products/{id} + POST /orders) → `pacts/marketplace-web-marketplace-api.json` |
+| `npm run verify:provider` | підняти реальний застосунок; `stateHandlers` сідають стан у стор провайдера (in-memory), Pact верифікує обидва interactions |
 
 ## Стратегія ізоляції — транзакція-ROLLBACK
 
@@ -627,9 +627,18 @@ PROVIDER_VERSION=1.0.0 bash scripts/with-secrets.sh dev npm run verify:provider 
 {"deployable":true,"reason":"All required verification results are published and successful","success":1,"failed":0,"unknown":0}
 ```
 
-У CI те саме робить job `contract` ([`.github/workflows/contract.yml`](.github/workflows/contract.yml)):
-publish → `verify:provider` (`publishVerificationResult`) → `can-i-deploy`, який **валить джобу**,
-якщо `deployable` не `true`.
+У CI ([`.github/workflows/contract.yml`](.github/workflows/contract.yml)) — **дві джоби**:
+
+- **`contract`**: publish → `verify:provider` (`publishVerificationResult`) → гейт
+  `can-i-deploy pacticipant=marketplace-api … to=prod`, який **валить джобу**, якщо `deployable` не `true`.
+  Гейтимо САМЕ провайдера (цей репозиторій = `marketplace-api`): він зелений на успішній верифікації
+  **без жодного prod-тега перед гейтом** — ніщо не «протягує» результат.
+- **`deploy`** (`needs: contract`): запис розгортання — prod-тег версії провайдера ставиться **тут**,
+  уже після зеленого гейта (а не перед ним). Брокер у CI ефемерний per-job, тож deploy-job
+  відновлює стан (publish + verify) перед тегом; із постійним брокером лишився б самий тег.
+
+Демо `unknown → true` вище показує, що гейт справжній: консюмерський `can-i-deploy` стає `true`
+лише коли верифікована версія провайдера справді в prod (саме це й робить `deploy`-джоба).
 
 ## Секрети брокера
 
