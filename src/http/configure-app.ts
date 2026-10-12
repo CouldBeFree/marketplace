@@ -16,7 +16,9 @@ export function attachPreInit(app: NestExpressApplication): void {
       apiSpec: resolveFromRoot('openapi/openapi.yaml'),
       validateRequests: true,
       validateResponses: true,
-      ignorePaths: /^\/health/,
+      // realtime-шляхи поза REST-контрактом: health, socket.io handshake,
+      // SSE-потік подій і зміна статусу (їх у openapi.yaml немає навмисно)
+      ignorePaths: /\/health|\/socket\.io|\/orders\/[^/]+\/(events|status)/,
     }),
   );
   app.useGlobalFilters(new ProblemJsonFilter());
