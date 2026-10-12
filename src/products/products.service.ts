@@ -25,4 +25,22 @@ export class ProductsService {
     }
     return product;
   }
+
+  // --- Сід для provider-state (Pact). HTTP-шар in-memory (варіант Б), тож стан сідаємо
+  //     саме в стор, який читає провайдер — а не в БД (її схема нормалізована й контракт
+  //     ДЗ #9 із рядкових id/currency не представляє). ---
+
+  // In-memory аналог INSERT ... ON CONFLICT DO NOTHING: додати товар, якщо його ще немає.
+  seedIfAbsent(product: Product): void {
+    if (!this.find(product.id)) {
+      this.products.push(product);
+    }
+  }
+
+  // Повна заміна каталогу. Provider-verification стартує з порожнього, щоб потрібний
+  // товар сідав САМЕ stateHandler (інакше верифікація мовчки трималась би на дефолті).
+  reset(products: Product[] = []): void {
+    this.products.length = 0;
+    this.products.push(...products);
+  }
 }

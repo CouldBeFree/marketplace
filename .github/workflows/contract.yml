@@ -1,0 +1,90 @@
+name: contract
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# Адреса й токен брокера — спільні для обох джоб (локальний compose-брокер відповідає
+# на 127.0.0.1:9292 без токена; у проді токен приїжджає з secrets GitHub).
+env:
+  PACT_BROKER_URL: http://127.0.0.1:9292
+  PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+  CONSUMER_VERSION: ${{ github.sha }}
+  PROVIDER_VERSION: ${{ github.sha }}
+
+jobs:
+  # 1) Контракт + гейт. Жодного prod-тега ТУТ: гейт стоїть на самій верифікації.
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+
+      - name: Підняти Pact Broker
+        run: docker compose up -d --wait pactbroker-db pact-broker
+
+      - name: Згенерувати контракт (consumer)
+        run: npm run test:contract
+
+      - name: Publish контракту в брокер
+        run: |
+          curl -sS -X PUT \
+            "$PACT_BROKER_URL/pacts/provider/marketplace-api/consumer/marketplace-web/version/$CONSUMER_VERSION" \
+            -H 'Content-Type: application/json' \
+            -d @pacts/marketplace-web-marketplace-api.json \
+            -o /dev/null -w 'publish http: %{http_code}\n'
+
+      - name: Provider verification (+ publish result)
+        run: npm run verify:provider
+
+      - name: Гейт — can-i-deploy (провайдер → prod)
+        # Гейтимо САМЕ провайдера (цей репозиторій = marketplace-api). Зелений на успішній
+        # верифікації, БЕЗ попереднього тега — ніщо не «протягує» гейт. Блокує, якщо
+        # провайдер несумісний із консюмером, що вже в prod. Сам тег ставить deploy-job нижче.
+        run: |
+          RESP="$(curl -sS "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-api&version=$PROVIDER_VERSION&to=prod")"
+          echo "$RESP"
+          DEPLOYABLE="$(echo "$RESP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["summary"]["deployable"])')"
+          if [ "$DEPLOYABLE" != "True" ]; then
+            echo "can-i-deploy: деплой провайдера у prod ЗАБЛОКОВАНО (deployable=$DEPLOYABLE) — гейт тримає"
+            exit 1
+          fi
+          echo "can-i-deploy: OK — провайдера можна деплоїти в prod"
+
+  # 2) Deploy. Виконується ЛИШЕ після зеленого гейта (needs: contract). Тут — і тільки
+  #    тут — ставимо prod-тег (запис розгортання), уже ПІСЛЯ гейта, а не перед ним.
+  deploy:
+    needs: contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+
+      - name: Підняти Pact Broker
+        run: docker compose up -d --wait pactbroker-db pact-broker
+
+      # Брокер ефемерний per-job → відновлюємо стан (pact + verification), щоб тегнути
+      # саме верифіковану версію провайдера. У реальному multi-repo із постійним брокером
+      # цього кроку не було б — лишився б тільки тег нижче.
+      - name: Відновити стан брокера (pact + verification)
+        run: |
+          npm run test:contract
+          curl -sS -X PUT \
+            "$PACT_BROKER_URL/pacts/provider/marketplace-api/consumer/marketplace-web/version/$CONSUMER_VERSION" \
+            -H 'Content-Type: application/json' \
+            -d @pacts/marketplace-web-marketplace-api.json \
+            -o /dev/null -w 'publish http: %{http_code}\n'
+          npm run verify:provider
+
+      - name: Deploy — позначити версію провайдера розгорнутою в prod
+        run: |
+          curl -sS -X PUT \
+            "$PACT_BROKER_URL/pacticipants/marketplace-api/versions/$PROVIDER_VERSION/tags/prod" \
+            -H 'Content-Type: application/json' -o /dev/null -w 'tag prod http: %{http_code}\n'

@@ -30,3 +30,6 @@ Thumbs.db
 
 # Локальні інструкції Claude
 CLAUDE.md
+
+# testkit: URI тестового контейнера
+test/integration/testkit/.db-url
