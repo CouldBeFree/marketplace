@@ -1,4 +1,5 @@
 import { pool } from './db';
+import { emitOrderPlaced } from './events/emit';
 
 export interface CheckoutInput {
   buyerId: string;
@@ -74,6 +75,18 @@ export async function checkout(input: CheckoutInput): Promise<CheckoutResult> {
     );
 
     await client.query('COMMIT');
+
+    // Подія ПІСЛЯ COMMIT: нічого не публікуємо, поки транзакція не зафіксована (інакше
+    // ризик події про замовлення, якого не існує). No-op, якщо publisher не під'єднано
+    // (demo:race/тести) — критична транзакція лишається незалежною від брокера.
+    await emitOrderPlaced({
+      orderId,
+      buyerId,
+      productId,
+      quantity,
+      totalCents: unitPriceCents * quantity,
+    });
+
     return { ok: true, orderId };
   } catch (err) {
     // не даємо ROLLBACK на мертвому зʼєднанні замаскувати початкову помилку

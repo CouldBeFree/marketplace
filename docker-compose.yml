@@ -65,5 +65,29 @@ services:
       timeout: 3s
       retries: 30
 
+  # Брокер подій (ДЗ #19). Асинхронні повідомлення order.placed: topic-exchange →
+  # quorum-черга → споживач, з окремим контуром DLQ. Образ із суфіксом -management:
+  # web-UI на :15672 (app/app) + rabbitmq-diagnostics для healthcheck.
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      # дев-креденшели локального брокера (не секрет). Грейдер очікує саме їх у BROKER_URL.
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: app
+      # Erlang-cookie для розподіленого вузла. Явне значення — бо в деяких середовищах
+      # авто-генерація дає порожній cookie ("Too short cookie string") і брокер не стартує.
+      RABBITMQ_ERLANG_COOKIE: marketplace-rmq-cookie
+    ports:
+      - '${RABBITMQ_PORT:-5672}:5672'      # AMQP — застосунок/демо
+      - '${RABBITMQ_MGMT_PORT:-15672}:15672' # web-керування
+    healthcheck:
+      # офіційна перевірка «вузол живий» — щоб `docker compose up -d --wait` чекав
+      # саме готовності брокера, а не лише старту контейнера.
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_running']
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
 volumes:
   pgdata:

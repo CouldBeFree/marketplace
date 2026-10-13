@@ -387,6 +387,8 @@ export SKIP_VAULT=1                 # у грейдера немає досту�
 # застосунок ходить ЧЕРЕЗ PgBouncer (порт 6432), а не напряму в Postgres
 export DB_URL=postgres://marketplace:marketplace_dev_pw@127.0.0.1:6432/marketplace
 export DATABASE_URL="$DB_URL"       # ops-скрипти (backup/restore-drill) читають DATABASE_URL
+# ДЗ #19 — адреса брокера подій (дев-креди локального RabbitMQ з docker-compose, не секрет)
+export BROKER_URL=amqp://app:app@127.0.0.1:5672
 
 npm ci
 npm run build
@@ -404,6 +406,11 @@ npm run demo:retry         # serialization failure + retry: фінал ариф�
 # ДЗ #15 — бекап і restore-drill (беруть DATABASE_URL; pg_dump іде крізь PgBouncer)
 bash scripts/with-secrets.sh dev bash scripts/backup.sh         # датований -Fc дамп у backups/
 bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh  # відновлює у чистий контейнер → MATCH
+
+# ДЗ #19 — асинхронні події через RabbitMQ (беруть BROKER_URL; ефект — у ту саму БД)
+npm run demo:publish       # published=5 effect=5 dlq=0 prefetch=N (happy path + prefetch)
+npm run demo:dlq           # work=0 dlq=1 dlq-reason=rejected (отруєне → DLQ, причина прочитана)
+npm run demo:duplicate     # deliveries=2 effect=1 (дубль доставлено, ефект застосовано раз)
 ```
 
 > Дев-креденшели ролі `marketplace`/`marketplace_dev_pw` (їх створює `init.sql`) —
@@ -712,3 +719,102 @@ curl -sN -H 'X-User-Id: <owner>' http://localhost:3000/orders/<order_id>/events
 почує подію, що емітнули на інстансі A, а SSE-буфер не матиме чужих подій. Лікується
 **socket.io Redis-адаптером** (кросінстансний broadcast у кімнати) плюс спільною шиною/буфером
 (Redis pub/sub) — підключиться на Лекції 23.
+
+---
+
+# Async-події через RabbitMQ (ДЗ #19)
+
+У ДЗ #18 realtime доставляв лише тому, хто **зараз** підключений. Тут між сервісом і його
+читачами з'являється **брокер**, який зберігає повідомлення до появи одержувача. За це
+доводиться платити трьома окремими рахунками — і кожен має свою відповідь у коді:
+
+| Рахунок | У чому проявляється | Чим платимо (у цьому репо) |
+|---|---|---|
+| Робота може **зникнути** | підтвердив рано (`autoAck`) — падіння забрало все у вікні | ручний `ack` **після** ефекту (`consumer.ts`, `noAck:false`) |
+| Робота може виконатись **двічі** | `ack` не доїхав — брокер повернув повідомлення | **ідемпотентний ефект** (`effect.ts`, `INSERT … ON CONFLICT`) |
+| Робота може **застрягти** | лист, що не обробиться ніколи, вічно гріє кластер | **DLQ як окремий контур** (`x-dead-letter-exchange` → DLX → DLQ) |
+
+## Топологія
+
+Оголошує її **споживач/бутстрап** (`topology.ts`), а не продюсер: продюсер не має знати,
+хто його слухає. Routing key без відповідного binding — порожній звук (лист зникає, а
+продюсер отримує позитивний confirm), тому binding робимо саме при оголошенні черги.
+
+```
+                 shop.events (topic)                 shop.events.dlx (fanout)
+publisher ──order.placed──►  ├─ bind order.placed ─►  q.order.placed (quorum) ──reject──► ├─► q.order.placed.dlq
+(confirm channel)            │                         x-dead-letter-exchange: shop.events.dlx
+```
+
+- **Публікація** (`publisher.ts`) — через **confirm-канал** (`createConfirmChannel` +
+  колбек-підтвердження = `basic.ack` брокера). Без цього «опублікував» означає лише
+  «віддав у сокет». Тіло — свідомий контракт (`eventId`, `type`, `occurredAt`, `data`),
+  а не ORM-сутність через spread. `eventId` стабільний — саме за ним споживач упізнає дубль.
+- **Споживач** (`consumer.ts`) — `noAck:false`, `ack` **після** ефекту; невалідне тіло →
+  `reject(requeue=false)` → DLX → DLQ.
+- Подія виходить із критичної бізнес-операції: `checkout.ts` викликає `emitOrderPlaced`
+  **після `COMMIT`** (до коміту не публікуємо — інакше ризик події про замовлення, якого немає).
+
+## prefetch
+
+**`prefetch = 10`** (`topology.ts`). Обґрунтування за формулою `prefetch × час_обробки <
+consumer_timeout`: ефект тут — один маленький `INSERT` (~одиниці мс), стоковий
+`consumer_timeout` = 30 хв; `10 × ~5 мс ≈ 50 мс ≪ 30 хв`, тож конвеєр заповнений, а таймаут
+недосяжний. Для **важких** задач (секунди на лист) ставили б `1`, щоб один споживач не
+загрібав чергу й не пробивав таймаут; дефолтний `0` означає «без ліміту» — найгірший варіант.
+
+## Числа трьох прогонів (мої)
+
+| Демо | Вивід | Що доводить |
+|---|---|---|
+| `demo:publish` | `published=5 delivered=5 effect=5 acked=5 dlq=0 prefetch=10` | happy path: 5 подій → 5 ефектів → 5 ack, нічого в DLQ |
+| `demo:dlq` | `rejected=1 work=0 dlq=1 dlq-reason=rejected effect=0` | отруєне повідомлення пішло в DLQ; причину прочитано з `x-first-death-reason` |
+| `demo:duplicate` | `deliveries=2 effect=1 skipped=1` | дубль доставлено **двічі**, а ефект застосовано **один раз** |
+
+Кожне демо **самоочисне** (purge черг + свіжі `eventId` на кожен прогін), друкує
+`ключ=значення` по рядку й **само перевіряє** інваріант (`exit ≠ 0` при порушенні) —
+проходить двічі поспіль без ручного чищення.
+
+## Чому це at-least-once, а не exactly-once
+
+**Exactly-once на рівні доставки не існує ні в кого** — і RabbitMQ його не дає. Брокер дає
+**at-least-once доставку**: `ack` — це не «дійшло», це «я більше не вимагаю повтору».
+Підтвердив рано — втрата; підтвердив пізно (а `ack` не доїхав) — повтор; третього немає.
+
+Щоб результат усе ж був **один**, до at-least-once доставки я додав **ідемпотентний ефект**:
+`INSERT INTO processed_events (event_id) … ON CONFLICT DO NOTHING`. Повторна доставка тієї
+самої події вставляє 0 рядків — ефект мовчки пропускається. Разом:
+
+> **at-least-once доставка + ідемпотентний ефект = exactly-once РЕЗУЛЬТАТ.**
+
+Саме це видно очима в `demo:duplicate`: `deliveries=2`, але `effect=1`.
+
+Сховище оброблених подій — **у Postgres, не в пам'яті процесу**: `Set`/`Map` живе рівно
+стільки, скільки інстанс, і не існує між двома подами; таблиця ж переживає рестарт споживача.
+
+**Ідемпотентність vs ключ ідемпотентності** (різні слова): *ідемпотентність* — властивість
+операції (`UPDATE orders SET status='packed' WHERE id=42` ідемпотентний, `qty = qty - 1` — ні);
+*ключ ідемпотентності* (`eventId`) — інструмент, яким неідемпотентну операцію роблять
+безпечною для повтору. Тут ефект виражено через природний ключ, тож окремий дедуп не потрібен.
+
+## Тип черги та DLQ
+
+Робоча черга — **quorum** (`'x-queue-type':'quorum'`): durable за визначенням, підтримує
+`delivery-limit`. DLQ показую детерміновано через `reject(requeue=false)` → причина
+`rejected` (одна з чотирьох: `rejected | expired | maxlen | delivery_limit`). Повторну
+доставку в `demo:duplicate` викликаю `nack(requeue=true)` **після** ефекту (імітація
+падіння до того, як `ack` доїхав) — на quorum це не інкрементить delivery-count, тож
+лист не йде в DLQ помилково, а просто повертається на другу доставку.
+
+| Файл | Призначення |
+|---|---|
+| `src/events/topology.ts` | exchange + quorum-черга + binding + DLX; `x-dead-letter-exchange`, `prefetch` |
+| `src/events/publisher.ts` | публікація через confirm-канал (`waitForConfirms`) |
+| `src/events/consumer.ts` | споживач: `prefetch`, ручний `ack` після ефекту, `reject`→DLQ |
+| `src/events/effect.ts` | `processed_events` + `INSERT … ON CONFLICT` (ідемпотентний ефект) |
+| `src/events/order-placed.ts` | контракт події (`eventId`/`type`/`occurredAt`/`data`) + валідатор |
+| `src/events/emit.ts` | місток `checkout` → публікація `order.placed` після `COMMIT` |
+| `src/demo-publish.ts` / `demo-dlq.ts` / `demo-duplicate.ts` | три демо з контрактом виводу |
+
+Команди запуску — у розділі [`## Grading`](#grading) (через `scripts/with-secrets.sh`,
+`BROKER_URL` зі сховища ДЗ #11 або від грейдера з `SKIP_VAULT=1`).
