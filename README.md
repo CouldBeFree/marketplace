@@ -411,6 +411,11 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh  # відновл
 npm run demo:publish       # published=5 effect=5 dlq=0 prefetch=N (happy path + prefetch)
 npm run demo:dlq           # work=0 dlq=1 dlq-reason=rejected (отруєне → DLQ, причина прочитана)
 npm run demo:duplicate     # deliveries=2 effect=1 (дубль доставлено, ефект застосовано раз)
+
+# ДЗ #22 — transactional outbox + ідемпотентність (ходять у ту саму БД через обгортку)
+npm run demo:outbox        # requests=2 orders=1 outbox=1 published=1 effect=1 processed=1
+npm run demo:crash-write   # write-failed=1 orders=0 outbox=0 published=0 deliveries=0 effect=0
+npm run demo:crash-relay   # deliveries>=2 applied=1 effect=1 processed=1 (дубль, ефект один)
 ```
 
 > Дев-креденшели ролі `marketplace`/`marketplace_dev_pw` (їх створює `init.sql`) —
@@ -818,3 +823,117 @@ consumer_timeout`: ефект тут — один маленький `INSERT` (~
 
 Команди запуску — у розділі [`## Grading`](#grading) (через `scripts/with-secrets.sh`,
 `BROKER_URL` зі сховища ДЗ #11 або від грейдера з `SKIP_VAULT=1`).
+
+---
+
+# Outbox та ідемпотентність (ДЗ #22)
+
+ДЗ #19 публікувало `order.placed` **після** `COMMIT` (`checkout` → `emitOrderPlaced`). Між
+`COMMIT` бази й `publish` у брокер є проміжок, у який вміщається падіння процесу: замовлення
+в базі є, подія назовні не пішла — **втрата**. Спільного `COMMIT` між Postgres і RabbitMQ не
+існує. ДЗ #22 закриває цей проміжок **transactional outbox**-ом: подію пишемо рядком у таблицю
+`outbox` **тією самою транзакцією**, що й замовлення, а окремий **relay**-воркер виносить її в
+брокер. Платню за це — дублі на доставці — гасить **ідемпотентний ефект**.
+
+> **at-least-once + ідемпотентний ефект = exactly-once РЕЗУЛЬТАТ.** Exactly-once дає не
+> брокер, а те, що повторна доставка не змінює стан. У `checkout` post-commit `emitOrderPlaced`
+> більше не шлях доставки — його замінив рядок у `outbox` всередині транзакції.
+
+## Два боки «фейлу запису» (це серце ДЗ — їх не можна плутати)
+
+| Демо | Що падає | Що має статись |
+|---|---|---|
+| `demo:crash-write` | **бізнес-запис**: транзакція валиться вже **після** `INSERT` у `outbox` | подія не виходить назовні взагалі; order і outbox-рядок зникають **разом** (один `COMMIT`) |
+| ⭐ `demo:crash-relay` | **службовий запис** `published_at`: relay «вмирає» рівно **між** `publish` і `UPDATE` | подію опубліковано **вдруге**, а ефект лишився **один** |
+
+`crash-relay` доводить, що доставка **at-least-once**, а exactly-once береться з ідемпотентного
+ефекту, а не з брокера. **Форму обриву relay обрано змодельовану** — виняток рівно в точці між
+`publish` і `UPDATE published_at` (крок 8 коду лекції), а не `kill -9`: критерій перевіряє
+наслідок, а не спосіб, а змодельований обрив детермінований і не флакає в самоперевірці демо.
+
+## Потік
+
+```
+checkout(): BEGIN
+  UPDATE products stock-=q (захист від oversell) ; UPDATE users balance-=sum
+  INSERT orders ; INSERT order_items ; INSERT tasks
+  INSERT outbox (payload = toOrderPlacedEvent(order), published_at = NULL)  ← той самий COMMIT
+COMMIT
+        │
+relay:  SELECT … WHERE published_at IS NULL ORDER BY created_at, id
+        FOR UPDATE SKIP LOCKED LIMIT N  →  publish → UPDATE published_at
+        │
+consumer (одна транзакція):
+        INSERT processed_messages(message_id, consumer) ON CONFLICT DO NOTHING  ← рівень 2 (inbox)
+        якщо вставили: INSERT order_confirmations(order_id) ON CONFLICT DO NOTHING  ← рівень 1 (природний ключ)
+        COMMIT → ack
+```
+
+## Чому не можна поміняти місцями `publish` і `UPDATE published_at`
+
+Якщо спершу позначити рядок винесеним (`UPDATE published_at`), а потім публікувати — відмова
+`publish` (чи падіння між цими двома діями) дасть «позначили, але не віддали»: подія **втрачена
+назавжди**, бо для relay вона вже не `NULL` і він її більше не підбере. У поточному ж порядку
+(`publish` → `UPDATE`) та сама відмова залишає `published_at = NULL`, тож наступний прогін
+виносить подію **вдруге**. Вибір тут не між «добре» і «погано», а між **дублем і втратою**:
+дубль лікується дедуплікацією на консюмері, втрата не лікується нічим. Додатково: помилка
+`publish` не означає, що лист не доставлено — загубитися могла відповідь брокера, — тому дедуп
+на консюмері обовʼязковий незалежно від акуратності relay.
+
+## Три рівні ідемпотентності
+
+1. **Природний ключ (ефект).** Ефект — `INSERT INTO order_confirmations(order_id) ON CONFLICT
+   DO NOTHING`: один рядок підтвердження на замовлення. Повтор нічого не змінює — на відміну від
+   `UPDATE qty = qty - 1`, який на другій доставці зняв би вдвічі.
+2. **Inbox (`processed_messages`).** Позначка `(message_id, consumer)` і сам ефект — в **одній**
+   транзакції на одному клієнті пулу. Позначити в Redis, а ефект записати в Postgres — це знову
+   dual write, тільки в профіль. Саме тому межа «позначив оброблене ↔ застосував ефект» тут
+   закрита спільним `COMMIT`.
+3. **Ключ на API-краю (`idempotency_keys`).** Той самий `Idempotency-Key` з ДЗ #9, тепер із
+   серверною механікою: `INSERT … ON CONFLICT (key) DO NOTHING` всередині транзакції checkout.
+   Два однакові запити з тим самим ключем → **одне** замовлення, одна подія, один ефект. Ключ
+   ідентифікує **намір**, а не тіло: хеш тіла схлопнув би два легітимні однакові замовлення в одне.
+
+## Числа трьох прогонів (мої)
+
+```
+demo:outbox        requests=2 orders=1 outbox=1 published=1 deliveries=1 effect=1 processed=1
+demo:crash-write   write-failed=1 orders=0 outbox=0 published=0 deliveries=0 effect=0
+demo:crash-relay   published=2 deliveries=2 applied=1 effect=1 processed=1
+```
+
+У `crash-relay` `deliveries=2` при `effect=1` — дубль справді стався, а ефект застосовано раз.
+
+## Порядок, партиціонування і чистка
+
+- **Порядок доставки не гарантований.** `SKIP LOCKED` розкидає рядки між воркерами, тож `ORDER
+  BY created_at, id` задає лише порядок *вибірки*, не доставки. Порядок існує тільки в межах
+  ключа партиціонування; тут він не потрібен (`order.placed` самодостатня).
+- **Чому `published_at IS NULL`, а не курсор по `id`.** `bigint IDENTITY` видає номер на
+  `nextval`, а видимим рядок стає на `COMMIT` — тож «усі `id` більші за останній оброблений»
+  пропускав би рядки, що закомітились пізніше з меншим номером. Прапорець `NULL` такої діри не має.
+- **Чистка `outbox`.** Таблиця росте й гальмує той самий частковий індекс, від якого залежить
+  relay. План: періодично видаляти винесені старі рядки — `DELETE FROM outbox WHERE published_at
+  < now() - interval '7 days'` (нічний cron). Частковий індекс `WHERE published_at IS NULL`
+  індексує лише «хвіст», тож на швидкість relay обсяг винесених рядків не впливає, але місце й
+  autovacuum — впливають.
+
+## Debezium (чому snake_case тут безпечний)
+
+Ролі полів `outbox` — ті, що читає Debezium Outbox Event Router, тож пізніший перехід на CDC не
+перепише консюмерів. Канонічні імена в Debezium — **без** підкреслень (`aggregatetype`,
+`aggregateid`), і саме `aggregatetype` стоїть у `route.by.field` за замовчуванням. Мій
+snake_case (`aggregate_type`, `aggregate_id`) вимагав би явного перевизначення конектора:
+`route.by.field=aggregate_type`, `table.field.event.key=aggregate_id`. Жоден із девʼяти
+критеріїв на імена колонок не дивиться.
+
+| Файл | Призначення |
+|---|---|
+| `src/migrations/1792681513324-Outbox.ts` | `outbox` + `processed_messages` + `order_confirmations` + `idempotency_keys`; частковий індекс `WHERE published_at IS NULL` |
+| `src/checkout.ts` | бізнес-рядок і рядок `outbox` одним `COMMIT`; `Idempotency-Key` на API-краю |
+| `src/outbox/relay.ts` | `FOR UPDATE SKIP LOCKED` → `publish` → `UPDATE published_at` (саме в цьому порядку) |
+| `src/outbox/consumer.ts` | ефект через природний ключ + позначка в `processed_messages` в одній транзакції |
+| `src/outbox/event.ts` | явний `toOrderPlacedEvent(order)` — контракт, а не spread ORM-сутності |
+| `src/outbox/broker.ts` | виділена топологія ДЗ #22 (`outbox.events`) + confirm-publisher |
+| `src/outbox/schema.ts` | фікстури демо + запобіжне `CREATE … IF NOT EXISTS` (канон — міграція) |
+| `src/outbox/demo-outbox.ts` / `demo-crash-write.ts` / `demo-crash-relay.ts` | три демо з контрактом виводу |
