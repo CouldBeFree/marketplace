@@ -12,6 +12,15 @@ export const envSchema = z.object({
     .url('DB_URL must be a valid postgres:// connection string'),
 
   DB_PASSWORD_FILE: z.string().min(1).default('secrets/db_password'),
+
+  // Рядок підключення до брокера подій RabbitMQ (ДЗ #19), напр. amqp://app:app@host:5672.
+  // ОПЦІЙНА: HTTP-застосунок і тести без неї стартують; демо подій
+  // (demo:publish/dlq/duplicate) fail-fast, якщо її нема. Значення — зі сховища ДЗ #11
+  // (локально, через with-secrets) або від грейдера (export BROKER_URL + SKIP_VAULT=1).
+  BROKER_URL: z
+    .string()
+    .url('BROKER_URL must be a valid amqp:// connection string')
+    .optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
