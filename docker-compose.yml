@@ -89,5 +89,50 @@ services:
       retries: 20
       start_period: 20s
 
+  # ── Redis під КЕШ (ДЗ #23). maxmemory + allkeys-lru: кеш мусить витісняти найменш
+  # вживані ключі, коли впирається в ліміт пам'яті. Порт поза лекційним 22300-22399,
+  # щоб наш стек і стек лекції не билися за порт. save "" — без RDB-снапшотів (кеш
+  # не має переживати рестарт; це його і робить кешем, а не сховищем).
+  redis-cache:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ''
+    ports:
+      - '${REDIS_CACHE_PORT:-6391}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # ── Redis під ЧЕРГУ + сесії + ліміт (ДЗ #23). maxmemory-policy noeviction: BullMQ
+  # прямо вимагає — черга «cannot work properly if Redis evicts keys arbitrarily».
+  # Сесії тут же (noeviction ніколи не викине ключ сесії, на відміну від allkeys-lru).
+  # AOF everysec — довговічність задач/сесій між рестартами. Несумісність політик із
+  # кеш-інстансом — саме тому це ОКРЕМИЙ контейнер (SELECT 1 maxmemory не розводить).
+  redis-queue:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - 'yes'
+      - --appendfsync
+      - everysec
+    ports:
+      - '${REDIS_QUEUE_PORT:-6392}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
 volumes:
   pgdata:
