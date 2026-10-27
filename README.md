@@ -890,9 +890,13 @@ consumer (одна транзакція):
    dual write, тільки в профіль. Саме тому межа «позначив оброблене ↔ застосував ефект» тут
    закрита спільним `COMMIT`.
 3. **Ключ на API-краю (`idempotency_keys`).** Той самий `Idempotency-Key` з ДЗ #9, тепер із
-   серверною механікою: `INSERT … ON CONFLICT (key) DO NOTHING` всередині транзакції checkout.
-   Два однакові запити з тим самим ключем → **одне** замовлення, одна подія, один ефект. Ключ
-   ідентифікує **намір**, а не тіло: хеш тіла схлопнув би два легітимні однакові замовлення в одне.
+   серверною механікою **у БД** (не in-memory Map — те сховище не переживало б рестарт процесу
+   й не було б спільним між інстансами). Два однакові запити з тим самим ключем → **одне**
+   замовлення, одна подія, один ефект. `checkout()` клеймить ключ `INSERT … ON CONFLICT (key)
+   DO NOTHING` у своїй транзакції; HTTP `POST /orders` ходить у ту саму таблицю (колонки
+   `body_hash`/`response`: той самий ключ+тіло → replay збереженої відповіді, інше тіло → 422).
+   Ключ ідентифікує **намір**: саме хеш тіла як КЛЮЧ схлопнув би два легітимні однакові
+   замовлення в одне — тому ключем лишається заголовок, а `body_hash` лише стереже від підміни тіла.
 
 ## Числа трьох прогонів (мої)
 
@@ -930,7 +934,9 @@ snake_case (`aggregate_type`, `aggregate_id`) вимагав би явного �
 | Файл | Призначення |
 |---|---|
 | `src/migrations/1792681513324-Outbox.ts` | `outbox` + `processed_messages` + `order_confirmations` + `idempotency_keys`; частковий індекс `WHERE published_at IS NULL` |
+| `src/migrations/1793120051983-IdempotencyResponse.ts` | колонки `body_hash`/`response` для серверного `Idempotency-Key` на HTTP-краю |
 | `src/checkout.ts` | бізнес-рядок і рядок `outbox` одним `COMMIT`; `Idempotency-Key` на API-краю |
+| `src/orders/orders.service.ts` | `POST /orders`: ключ ідемпотентності в БД `idempotency_keys`, а не in-memory Map |
 | `src/outbox/relay.ts` | `FOR UPDATE SKIP LOCKED` → `publish` → `UPDATE published_at` (саме в цьому порядку) |
 | `src/outbox/consumer.ts` | ефект через природний ключ + позначка в `processed_messages` в одній транзакції |
 | `src/outbox/event.ts` | явний `toOrderPlacedEvent(order)` — контракт, а не spread ORM-сутності |

@@ -34,9 +34,16 @@ async function main(): Promise<void> {
   const consumer = await startOutboxConsumer(ch);
   const publisher = await createOutboxPublisher(conn);
 
-  // два однакові запити з тим самим ключем — другий має схлопнутись у те саме замовлення
-  const r1 = await checkout({ buyerId, productId, quantity: 1, idempotencyKey: IDEMPOTENCY_KEY });
-  const r2 = await checkout({ buyerId, productId, quantity: 1, idempotencyKey: IDEMPOTENCY_KEY });
+  // два однакові запити з тим самим ключем — другий має схлопнутись у те саме замовлення.
+  // requests рахуємо ФАКТИЧНО (лічильник на кожен виклик API-краю), а не літералом: інакше
+  // самоперевірка requests===2 порівнювала б константу з константою й нічого б не ловила.
+  let requests = 0;
+  const sendCheckout = () => {
+    requests++;
+    return checkout({ buyerId, productId, quantity: 1, idempotencyKey: IDEMPOTENCY_KEY });
+  };
+  const r1 = await sendCheckout();
+  const r2 = await sendCheckout();
   if (!r1.ok || !r2.ok) throw new Error('checkout неуспішний: ' + JSON.stringify([r1, r2]));
   if (r1.orderId !== r2.orderId) {
     throw new Error('ключ ідемпотентності не схлопнув два запити в одне замовлення');
@@ -50,7 +57,6 @@ async function main(): Promise<void> {
   });
   await consumer.stop();
 
-  const requests = 2;
   const orders = await countOrders(buyerId);
   const outbox = await countOutbox();
   const published = await countPublished();

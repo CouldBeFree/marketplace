@@ -3,6 +3,8 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
+import { pool } from '../db';
 import { Order } from '../common/models';
 import { paginate } from '../common/pagination';
 import { ProductsService } from '../products/products.service';
@@ -12,17 +14,10 @@ interface OrderCreateBody {
   items: { product_id: string; quantity: number }[];
 }
 
-interface IdempotencyRecord {
-  bodyKey: string;
-  status: number;
-  response: Order;
-}
-
 @Injectable()
 export class OrdersService {
   private readonly orders: Order[] = [];
   private seq = 0;
-  private readonly idempotencyStore = new Map<string, IdempotencyRecord>();
   // власник замовлення (внутрішньо, НЕ у HTTP-відповіді — щоб не ламати контракт спеки)
   private readonly owners = new Map<string, string>();
 
@@ -43,22 +38,61 @@ export class OrdersService {
     return order;
   }
 
-  create(
+  // Ключ ідемпотентності на API-краю (ДЗ #22, рівень 3) — у таблиці idempotency_keys,
+  // а НЕ в in-memory Map: сховище переживає рестарт процесу й спільне між інстансами
+  // (Map жило рівно стільки, скільки под, і не існувало між двома подами). Ключ ідентифікує
+  // НАМІР: той самий ключ + те саме тіло → replay збереженої відповіді; інше тіло → 422.
+  async create(
     key: string,
     body: OrderCreateBody,
     ownerId: string,
-  ): { order: Order; replay: boolean } {
-    const bodyKey = JSON.stringify(body);
-    const saved = this.idempotencyStore.get(key);
-    if (saved) {
-      if (saved.bodyKey === bodyKey) {
-        return { order: saved.response, replay: true };
+  ): Promise<{ order: Order; replay: boolean }> {
+    const bodyHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+
+    const prev = await pool.query(
+      `SELECT body_hash, response FROM idempotency_keys WHERE key = $1`,
+      [key],
+    );
+    if (prev.rowCount && prev.rows[0].response) {
+      if (prev.rows[0].body_hash !== bodyHash) {
+        throw new UnprocessableEntityException(
+          `Idempotency-Key '${key}' was already used with a different request body`,
+        );
       }
-      throw new UnprocessableEntityException(
-        `Idempotency-Key '${key}' was already used with a different request body`,
-      );
+      return { order: prev.rows[0].response as Order, replay: true };
     }
 
+    // будуємо замовлення ДО запису ключа: якщо товару немає — кидаємо 422 ще до claim,
+    // тож невдалий запит не «спалює» ключ (повтор із тим самим ключем лишається дозволеним).
+    const order = this.build(body);
+
+    // claim+відповідь одним записом. ON CONFLICT ловить гонку двох однакових ключів:
+    // 0 рядків = нас випередили → віддаємо вже збережену відповідь (replay), не дублюючи.
+    const ins = await pool.query(
+      `INSERT INTO idempotency_keys (key, body_hash, response) VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (key) DO NOTHING
+       RETURNING key`,
+      [key, bodyHash, JSON.stringify(order)],
+    );
+    if (ins.rowCount === 0) {
+      const raced = await pool.query(
+        `SELECT body_hash, response FROM idempotency_keys WHERE key = $1`,
+        [key],
+      );
+      if (raced.rows[0]?.body_hash !== bodyHash) {
+        throw new UnprocessableEntityException(
+          `Idempotency-Key '${key}' was already used with a different request body`,
+        );
+      }
+      return { order: raced.rows[0].response as Order, replay: true };
+    }
+
+    this.orders.push(order);
+    this.owners.set(order.id, ownerId || 'anonymous');
+    return { order, replay: false };
+  }
+
+  private build(body: OrderCreateBody): Order {
     const items = body.items.map((line) => {
       const product = this.products.find(line.product_id);
       if (!product) {
@@ -74,7 +108,7 @@ export class OrdersService {
     const total_cents = items.reduce((sum, i) => sum + i.quantity * i.unit_price_cents, 0);
     const currency = this.products.find(items[0].product_id)!.currency;
 
-    const order: Order = {
+    return {
       id: `order_${++this.seq}`,
       status: 'created',
       items,
@@ -82,11 +116,6 @@ export class OrdersService {
       currency,
       created_at: new Date().toISOString(),
     };
-
-    this.orders.push(order);
-    this.owners.set(order.id, ownerId || 'anonymous');
-    this.idempotencyStore.set(key, { bodyKey, status: 201, response: order });
-    return { order, replay: false };
   }
 
   ownerOf(id: string): string | undefined {

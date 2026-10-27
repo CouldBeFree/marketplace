@@ -10,3 +10,11 @@ export const pool = new Pool({
   connectionString: process.env.DB_URL,
   max: Number(process.env.PG_POOL_MAX ?? 50),
 });
+
+// Простійний клієнт пулу може «впасти» через розрив на боці БД (зупинка тест-контейнера,
+// рестарт/failover Postgres). pg тоді емітить 'error' на пулі — і БЕЗ цього слухача це
+// unhandled 'error', що валить процес (напр. e2e після globalTeardown). Слухач робить збій
+// ідемпотентним: пул сам викине мертвого клієнта, наступний query візьме свіжого.
+pool.on('error', (err) => {
+  console.error('[pg pool] простійний клієнт відпав:', err.message);
+});

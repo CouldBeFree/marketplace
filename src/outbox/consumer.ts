@@ -10,6 +10,7 @@ export interface OutboxConsumerStats {
   effect: number; // скільки разів ефект фактично застосовано (дублі не рахуються)
   skipped: number; // доставки, відсіяні як дубль (повідомлення вже в processed_messages)
   acked: number;
+  errored: number; // доставки, де обробка кинула виняток → nack(requeue) замість ack
 }
 export interface OutboxConsumerHandle {
   stats: OutboxConsumerStats;
@@ -21,33 +22,53 @@ export async function startOutboxConsumer(
   opts: { prefetch?: number; onProgress?: (s: OutboxConsumerStats) => void } = {},
 ): Promise<OutboxConsumerHandle> {
   await ch.prefetch(opts.prefetch ?? 10);
-  const stats: OutboxConsumerStats = { delivered: 0, effect: 0, skipped: 0, acked: 0 };
+  const stats: OutboxConsumerStats = {
+    delivered: 0,
+    effect: 0,
+    skipped: 0,
+    acked: 0,
+    errored: 0,
+  };
 
   const onMessage = async (msg: ConsumeMessage | null): Promise<void> => {
     if (!msg) return;
     stats.delivered++;
 
-    let event: unknown;
     try {
-      event = JSON.parse(msg.content.toString());
-    } catch {
-      event = null;
-    }
-    if (!isOrderPlaced(event)) {
-      ch.ack(msg); // у ДЗ #22 без DLQ — просто підтверджуємо, демо білих тіл не шле
+      let event: unknown;
+      try {
+        event = JSON.parse(msg.content.toString());
+      } catch {
+        event = null;
+      }
+      if (!isOrderPlaced(event)) {
+        ch.ack(msg); // у ДЗ #22 без DLQ — просто підтверджуємо, демо білих тіл не шле
+        stats.acked++;
+        opts.onProgress?.(stats);
+        return;
+      }
+
+      const { applied } = await applyOnce(event.eventId, event.data.orderId);
+      if (applied) stats.effect++;
+      else stats.skipped++;
+
+      // ack ПІСЛЯ ефекту: ack означає «я більше не вимагаю повтору», не «дійшло».
+      ch.ack(msg);
       stats.acked++;
       opts.onProgress?.(stats);
-      return;
+    } catch (err) {
+      // Збій ефекту (напр. БД недоступна): applyOnce відкотив транзакцію — часткового стану
+      // немає. НЕ робимо ack: nack(requeue=true) повертає лист у чергу, тож доставка лишається
+      // at-least-once, а повтор на дедупі безпечний. Без цього лист застряг би unacked, а сам
+      // виняток став би unhandled rejection. (Для poison-листа у проді тут був би ліміт спроб/DLQ.)
+      stats.errored++;
+      try {
+        ch.nack(msg, false, true);
+      } catch {
+        /* канал уже закритий — нема куди nack-ати */
+      }
+      opts.onProgress?.(stats);
     }
-
-    const { applied } = await applyOnce(event.eventId, event.data.orderId);
-    if (applied) stats.effect++;
-    else stats.skipped++;
-
-    // ack ПІСЛЯ ефекту: ack означає «я більше не вимагаю повтору», не «дійшло».
-    ch.ack(msg);
-    stats.acked++;
-    opts.onProgress?.(stats);
   };
 
   const { consumerTag } = await ch.consume(OUTBOX_QUEUE, onMessage, { noAck: false });

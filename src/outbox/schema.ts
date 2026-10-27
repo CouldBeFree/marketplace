@@ -38,6 +38,8 @@ export async function ensureOutboxSchema(): Promise<void> {
     CREATE TABLE IF NOT EXISTS idempotency_keys (
       key        text PRIMARY KEY,
       order_id   bigint,
+      body_hash  text,
+      response   jsonb,
       created_at timestamptz NOT NULL DEFAULT now()
     )
   `);
