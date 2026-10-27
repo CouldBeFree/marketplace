@@ -34,13 +34,13 @@ export class OrdersController {
 
   @Post()
   @HttpCode(201)
-  create(
+  async create(
     @Headers('idempotency-key') key: string,
     @Headers('x-user-id') userId: string,
     @Body() body: { items: { product_id: string; quantity: number }[] },
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { order, replay } = this.orders.create(key, body, userId);
+    const { order, replay } = await this.orders.create(key, body, userId);
     if (replay) {
       res.setHeader('Idempotency-Replay', 'true');
     }
