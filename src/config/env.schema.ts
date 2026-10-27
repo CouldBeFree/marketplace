@@ -21,6 +21,20 @@ export const envSchema = z.object({
     .string()
     .url('BROKER_URL must be a valid amqp:// connection string')
     .optional(),
+
+  // Redis під КЕШ (ДЗ #23), напр. redis://host:6391 (інстанс allkeys-lru + maxmemory).
+  // ОПЦІЙНА: застосунок/тести без неї стартують; demo:cache fail-fast без неї.
+  REDIS_URL: z
+    .string()
+    .url('REDIS_URL must be a valid redis:// connection string')
+    .optional(),
+
+  // Redis під ЧЕРГУ + сесії + rate-limit (ДЗ #23), напр. redis://host:6392 (noeviction).
+  // ОПЦІЙНА: demo:session/ratelimit/queue fail-fast без неї.
+  REDIS_QUEUE_URL: z
+    .string()
+    .url('REDIS_QUEUE_URL must be a valid redis:// connection string')
+    .optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
