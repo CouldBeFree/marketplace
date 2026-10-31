@@ -30,11 +30,37 @@ export const envSchema = z.object({
     .optional(),
 
   // Redis під ЧЕРГУ + сесії + rate-limit (ДЗ #23), напр. redis://host:6392 (noeviction).
-  // ОПЦІЙНА: demo:session/ratelimit/queue fail-fast без неї.
+  // ОПЦІЙНА: demo:session/ratelimit/queue fail-fast без неї. ДЗ #24 кладе сюди ж денилист
+  // access-токенів (noeviction — денилист не можна витісняти, інакше токен «воскресне»).
   REDIS_QUEUE_URL: z
     .string()
     .url('REDIS_QUEUE_URL must be a valid redis:// connection string')
     .optional(),
+
+  // ── ДЗ #24: Auth ────────────────────────────────────────────────────────────
+  // Ключі підпису access-JWT (ES256) приходять ЗІ СХОВИЩА ДЗ #11, base64 від PEM
+  // (багаторядковий PEM в export виживає не скрізь → кладемо base64). ОБОВʼЯЗКОВІ й БЕЗ
+  // дефолтів: дефолт тут = зашитий у код ключ, тобто можливість підробити будь-який токен.
+  // Без них голий `npm run start` падає на валідації (до БД) і називає змінну (критерій 3).
+  JWT_PRIVATE_KEY: z
+    .string({ required_error: 'JWT_PRIVATE_KEY is required (base64 EC P-256 PKCS8 PEM зі сховища)' })
+    .min(1, 'JWT_PRIVATE_KEY must not be empty'),
+
+  JWT_PUBLIC_KEY: z
+    .string({ required_error: 'JWT_PUBLIC_KEY is required (base64 EC P-256 SPKI PEM зі сховища)' })
+    .min(1, 'JWT_PUBLIC_KEY must not be empty'),
+
+  // kid у JWT-заголовку → який ключ перевіряти (overlap-ротація: під час ротації приймаємо
+  // і старий, і новий kid). Назва ключа, не секрет; обовʼязкова (без неї не знаємо, чим верифікувати).
+  JWT_KID: z
+    .string({ required_error: 'JWT_KID is required' })
+    .min(1, 'JWT_KID must not be empty'),
+
+  // «Перець» для HMAC-хеша refresh-токена: у БД лежить HMAC(pepper, token), а не токен і не
+  // голий SHA-256 — дамп таблиці стає марним навіть при витоку бази. Зі сховища, без дефолту.
+  REFRESH_TOKEN_PEPPER: z
+    .string({ required_error: 'REFRESH_TOKEN_PEPPER is required (зі сховища)' })
+    .min(16, 'REFRESH_TOKEN_PEPPER must be at least 16 chars'),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -48,6 +48,31 @@ paths:
                 $ref: '#/components/schemas/ProductList'
         '400':
           $ref: '#/components/responses/ValidationError'
+    post:
+      operationId: createProduct
+      summary: Створити товар (лише продавець/адмін — ДЗ #24)
+      description: >-
+        Запис у каталог дозволено лише ролі seller/admin. Анонім → 401,
+        покупець із валідним токеном → 403 (RBAC рівня ролі).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductCreate'
+      responses:
+        '201':
+          description: Товар створено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /products/{id}:
     get:
@@ -137,13 +162,15 @@ paths:
                 $ref: '#/components/schemas/Order'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '422':
           $ref: '#/components/responses/IdempotencyConflict'
 
   /orders/{id}:
     get:
       operationId: getOrder
-      summary: Отримати одне замовлення за його id
+      summary: Отримати одне замовлення за його id (лише власник або admin — ДЗ #24)
       parameters:
         - name: id
           in: path
@@ -158,6 +185,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -181,6 +212,18 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Автентифікація не пройдена (немає / протух / зіпсований токен) — ДЗ #24
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: Токен валідний, але прав на цей ресурс немає (роль або власність) — ДЗ #24
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
 
   schemas:
     Product:
@@ -196,6 +239,24 @@ components:
         price_cents:
           type: integer
           description: Ціна в копійках (мінімальна одиниця валюти). Ціле число, не float.
+          example: 2600
+        currency:
+          type: string
+          description: Код валюти (ISO 4217).
+          example: UAH
+
+    ProductCreate:
+      type: object
+      additionalProperties: false
+      required: [name, price_cents, currency]
+      properties:
+        name:
+          type: string
+          example: Кавоварка
+        price_cents:
+          type: integer
+          minimum: 0
+          description: Ціна в копійках (ціле, не float).
           example: 2600
         currency:
           type: string
