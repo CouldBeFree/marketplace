@@ -389,6 +389,9 @@ export DB_URL=postgres://marketplace:marketplace_dev_pw@127.0.0.1:6432/marketpla
 export DATABASE_URL="$DB_URL"       # ops-скрипти (backup/restore-drill) читають DATABASE_URL
 # ДЗ #19 — адреса брокера подій (дев-креди локального RabbitMQ з docker-compose, не секрет)
 export BROKER_URL=amqp://app:app@127.0.0.1:5672
+# ДЗ #23 — два інстанси Redis: кеш (allkeys-lru) і черга+сесії+ліміт (noeviction)
+export REDIS_URL=redis://127.0.0.1:6391
+export REDIS_QUEUE_URL=redis://127.0.0.1:6392
 
 npm ci
 npm run build
@@ -416,6 +419,12 @@ npm run demo:duplicate     # deliveries=2 effect=1 (дубль доставле�
 npm run demo:outbox        # requests=2 orders=1 outbox=1 published=1 effect=1 processed=1
 npm run demo:crash-write   # write-failed=1 orders=0 outbox=0 published=0 deliveries=0 effect=0
 npm run demo:crash-relay   # deliveries>=2 applied=1 effect=1 processed=1 (дубль, ефект один)
+
+# ДЗ #23 — Redis: кеш, сесії, ліміт, черга (ходять у Redis через обгортку)
+npm run demo:cache      # db-calls=1 db-calls-warm=0 cache-lru=1 cache-maxmemory=1 (лавина → 1 похід)
+npm run demo:session    # sessions=1 in-redis=1 ttl-renewed=1 (сесія в Redis + rolling TTL)
+npm run demo:ratelimit  # status=429 retry-after=1 allowed==limit (ліміт спільний на 2 поди)
+npm run demo:queue      # completed=1 added=2 queued=1 queue-noeviction=1 (ретрай + дедуп + планувальник)
 ```
 
 > Дев-креденшели ролі `marketplace`/`marketplace_dev_pw` (їх створює `init.sql`) —
@@ -943,3 +952,81 @@ snake_case (`aggregate_type`, `aggregate_id`) вимагав би явного �
 | `src/outbox/broker.ts` | виділена топологія ДЗ #22 (`outbox.events`) + confirm-publisher |
 | `src/outbox/schema.ts` | фікстури демо + запобіжне `CREATE … IF NOT EXISTS` (канон — міграція) |
 | `src/outbox/demo-outbox.ts` / `demo-crash-write.ts` / `demo-crash-relay.ts` | три демо з контрактом виводу |
+
+---
+
+# Redis: кеш, сесії, ліміти, черга (ДЗ #23)
+
+Redis **не робить систему правильною — він робить її швидкою**. Та сама подія `order.placed`,
+яку ДЗ #22 навчилось атомарно писати в outbox, тепер може поїхати в чергу BullMQ; а
+найгарячіше читання API перестає щоразу ходити в базу. Чотири задачі — кеш, сесії, ліміт,
+черга — на **двох** інстансах Redis, бо їхні політики витіснення несумісні.
+
+## Чому ДВА інстанси Redis
+
+| Інстанс | Політика | Для чого | Порт |
+|---|---|---|---|
+| `redis-cache` | `maxmemory 64mb` + **`allkeys-lru`** | cache-aside (картка товару) | `6391` |
+| `redis-queue` | **`noeviction`** + AOF everysec | черга BullMQ, сесії, rate-limit | `6392` |
+
+Кеш **вимагає** витіснення (`allkeys-lru`); BullMQ **вимагає протилежного** — документація прямо
+каже, що черга «cannot work properly if Redis evicts keys arbitrarily», тому `noeviction`.
+`maxmemory-policy` **одна на весь процес**, і `SELECT <n>` її не розводить (бази логічні, пам'ять
+спільна) — тому це **два контейнери**, а не два номери бази в одному. Критерій 6 перевіряє це
+поведінково: `demo:cache` друкує `cache-lru=1`, `demo:queue` — `queue-noeviction=1`; один інстанс
+обидва дати не може. Сесії теж **не** в кеші: `allkeys-lru` колись викинув би сесію й дав
+розлогінення, яке ніхто не відтворить, — тому сесії/ліміт на noeviction-інстансі разом із чергою.
+
+## Що зроблено
+
+1. **Cache-aside** на дорогому читанні (картка = продукт + залишок + агрегат проданого). Промах →
+   БД → запис із **TTL+джитер** (`300 + rand(0..60)`с, розкид 60с): без джитера ключі, прогріті
+   одним циклом, протухли б в одну секунду й дали stampede на порожньому місці. `cacheSet` у
+   `try/catch` — кеш, який роняє запит на OOM, це не кеш.
+2. **Single-flight лок проти stampede**: `SET lock:<key> <token> NX PX`, знімаємо **Lua
+   compare-and-delete** (голий `DEL` зняв би чужий лок). ≥20 одночасних запитів на холодний ключ →
+   **один** похід у базу; `db-calls` рахується на рівні репозиторію, а не «скільки викликів».
+3. **Сесії** — хеш у Redis із **rolling TTL** (`EXPIRE` на кожному доступі): активний користувач
+   не вилітає. Сховище — Redis (переживає рестарт процесу), інстанс — noeviction.
+4. **Rate-limit — ковзне вікно одним Lua-скриптом**. Чому ця модель: запитання завжди «дозволяємо
+   сплеск чи ні?» — ковзне вікно каже **ні** (фіксоване пропускало б до 2× ліміту на стику вікон).
+   Тут атомарність — **вимога коректності**: між `ZCARD` і `ZADD` інакше влазить інший под, і ліміт
+   протікає рівно під навантаженням. Лічильник у Redis → два поди ділять один ліміт; перевищення →
+   `429` + `Retry-After`.
+5. **Черга BullMQ**: `attempts:3` + exponential backoff з jitter; `jobId` для дедупу (два `add` →
+   одна задача; `removeOnComplete` тримаємо `{age}`, бо `true` вимикає дедуп); планувальник через
+   **`upsertJobScheduler`** (repeatable-API у BullMQ 6 прибрано; `upsert`, не `add`, — інакше кожен
+   рестарт плодив би дублікати). Воркер — з `maxRetriesPerRequest:null`.
+
+## Що станеться, якщо stampede-лок зламається (і чому тут це прийнятно)
+
+Якщо лок у пункті 2 зламається — наприклад, процес завмер довше за TTL лока, той протух і його
+взяв інший, — лавина запитів дасть **кілька паралельних походів у базу** замість одного. Ціна —
+кілька зайвих центів і трохи навантаження, **стан не псується**: усі походи читають те саме й
+пишуть у кеш те саме. Саме тому тут вистачає простого `SET NX` і не потрібен монотонний **fencing
+token**: лок — це **оптимізація**, а не захист бізнес-інваріанта. Той самий `SET NX PX` у ролі
+захисту інваріанта (напр. «не списати оплату двічі») коштував би **зіпсованого стану** — і такий
+інваріант ми локом не захищаємо (його тримає транзакція + ідемпотентність із ДЗ #14/#22). Різниця
+не в коді, а в ціні відмови: дубль у кеші лікується дедупом, зіпсований баланс — нічим.
+
+## Числа моїх прогонів
+
+```
+demo:cache      cache-lru=1 cache-maxmemory=1 warmed=60 ttl-distinct=37 concurrent=30 db-calls=1 db-calls-warm=0
+demo:session    requests=3 sessions=1 in-redis=1 ttl-renewed=1
+demo:ratelimit  instances=2 limit=5 requests=12 allowed=5 blocked=7 status=429 retry-after=1
+demo:queue      queue-noeviction=1 attempts=3 completed=1 added=2 queued=1 schedulers=1 scheduled-runs=2
+```
+
+`ttl-distinct` плаває від прогону до прогону (джитер) — без нього було б рівно 1. `db-calls=1`
+натомість детерміноване: `SET NX` виграє рівно один клієнт.
+
+| Файл | Призначення |
+|---|---|
+| `docker-compose.yml` | `redis-cache` (allkeys-lru + maxmemory) і `redis-queue` (noeviction + AOF) |
+| `src/redis/cache.ts` | cache-aside, джитер-TTL, `db-calls`-лічильник на рівні репозиторію |
+| `src/redis/lock.ts` | single-flight `SET NX PX` + Lua compare-and-delete |
+| `src/redis/session.ts` | сесія-хеш із rolling TTL (noeviction-інстанс) |
+| `src/redis/ratelimit.ts` | ковзне вікно одним атомарним Lua-скриптом |
+| `src/redis/queue.ts` | BullMQ Queue/Worker: `attempts`, backoff, `jobId`-дедуп, scheduler |
+| `src/redis/demo-cache.ts` / `demo-session.ts` / `demo-ratelimit.ts` / `demo-queue.ts` | чотири демо з контрактом виводу |
