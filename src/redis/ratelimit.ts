@@ -6,14 +6,17 @@ import type Redis from 'ioredis';
 // була оптимізацією). Модель — ковзне вікно: жодного сплеску на межі (фіксоване пропускало б
 // до 2× ліміту на стику вікон).
 //
-// KEYS[1] — ключ вікна (спільний на всі поди). ARGV: now(ms), window(ms), limit, member.
+// KEYS[1] — ключ вікна (спільний на всі поди). ARGV: window(ms), limit, member.
+// Час беремо з redis.call('TIME') ВСЕРЕДИНІ скрипта, а не з годинника пода: усі поди міряють
+// вікно одним годинником Redis-сервера, тож розбіг їхніх системних годинників його не зсуває.
 // Повертає {allowed(1/0), remaining, retryAfterMs}.
 const SLIDING_WINDOW = `
 local key = KEYS[1]
-local now = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-local limit = tonumber(ARGV[3])
-local member = ARGV[4]
+local window = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local member = ARGV[3]
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
 local count = redis.call('ZCARD', key)
 if count < limit then
@@ -45,12 +48,10 @@ export class RateLimiter {
   ) {}
 
   async check(member: string): Promise<RateLimitResult> {
-    const now = Date.now();
     const [allowed, remaining, retryMs] = (await this.redis.eval(
       SLIDING_WINDOW,
       1,
       this.key,
-      String(now),
       String(this.windowMs),
       String(this.limit),
       member,

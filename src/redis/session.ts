@@ -16,8 +16,10 @@ export async function createSession(
   const key = SESSION_PREFIX + sessionId;
   const flat: string[] = [];
   for (const [k, v] of Object.entries(data)) flat.push(k, String(v));
-  await redis.hset(key, ...flat);
-  await redis.expire(key, ttlSec);
+  // HSET і EXPIRE — АТОМАРНО (MULTI): дві окремі команди лишили б вікно, де краш/обрив між ними
+  // створив би хеш БЕЗ TTL → безсмертна сесія (витік пам'яті + протермінована сесія лишається
+  // живою). touchSession цього не потребує: обрив там лишає старий, коротший TTL — fail-safe.
+  await redis.multi().hset(key, ...flat).expire(key, ttlSec).exec();
 }
 
 // Прочитати сесію й ПРОДОВЖИТИ TTL (rolling): активний користувач не має вилетіти посеред
