@@ -10,10 +10,14 @@ import {
   Post,
   Query,
   Res,
+  UseGuards,
 } from '@nestjs/common';
 import { Response } from 'express';
 import { OrdersService } from './orders.service';
 import { OrderEvent, OrderEventsService } from './order-events.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { CurrentUser } from '../auth/current-user.decorator';
+import { AccessClaims } from '../auth/token.service';
 
 @Controller('orders')
 export class OrdersController {
@@ -27,20 +31,31 @@ export class OrdersController {
     return this.orders.list(limit === undefined ? undefined : Number(limit), cursor);
   }
 
+  // RBAC рівня ВЛАСНОСТІ. Це НЕ гард: гард стоїть до завантаження ресурсу й даних про власника
+  // не має. Спершу завантажуємо замовлення (404, якщо нема — навіть власнику), ТОДІ звіряємо
+  // власника з особою токена. Чуже замовлення під валідним токеном → 403 (НЕ 401). admin — виняток.
   @Get(':id')
-  get(@Param('id') id: string) {
-    return this.orders.get(id);
+  @UseGuards(JwtAuthGuard)
+  get(@Param('id') id: string, @CurrentUser() user: AccessClaims) {
+    const order = this.orders.get(id); // 404, якщо немає
+    if (user.role !== 'admin' && this.orders.ownerOf(id) !== user.sub) {
+      throw new ForbiddenException('not your order');
+    }
+    return order;
   }
 
+  // Створити замовлення може лише автентифікований користувач; власник = особа з ТОКЕНА
+  // (раніше довіряли заголовку X-User-Id — будь-хто міг створити від чийого завгодно імені).
   @Post()
   @HttpCode(201)
+  @UseGuards(JwtAuthGuard)
   async create(
     @Headers('idempotency-key') key: string,
-    @Headers('x-user-id') userId: string,
+    @CurrentUser() user: AccessClaims,
     @Body() body: { items: { product_id: string; quantity: number }[] },
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { order, replay } = await this.orders.create(key, body, userId);
+    const { order, replay } = await this.orders.create(key, body, user.sub);
     if (replay) {
       res.setHeader('Idempotency-Replay', 'true');
     }
