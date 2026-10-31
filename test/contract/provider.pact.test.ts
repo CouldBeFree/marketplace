@@ -1,11 +1,13 @@
 import 'reflect-metadata';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { Test } from '@nestjs/testing';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Verifier, VerifierOptions } from '@pact-foundation/pact';
 import { AppModule } from '../../src/app.module';
 import { attachPreInit, attachPostInit } from '../../src/http/configure-app';
 import { ProductsService } from '../../src/products/products.service';
+import { TokenService } from '../../src/auth/token.service';
 import { testDbUrl } from '../integration/testkit/db';
 
 const PROVIDER = 'marketplace-api';
@@ -18,6 +20,7 @@ const PORT = Number(process.env.PROVIDER_PORT ?? 3999);
 // (локально приїжджають обгорткою зі сховища ДЗ #11, у CI — з secrets GitHub).
 describe('contract: provider verification (marketplace-api)', () => {
   let app: NestExpressApplication;
+  let authHeader: string; // валідний Bearer, який інжектимо під час верифікації (ДЗ #24)
 
   beforeAll(async () => {
     process.env.DB_URL = testDbUrl();
@@ -29,6 +32,9 @@ describe('contract: provider verification (marketplace-api)', () => {
     // Порожній каталог: товар під стан поставить ВИКЛЮЧНО stateHandler (див. нижче),
     // тож верифікація не тримається на дефолтному масиві ProductsService.
     app.get(ProductsService).reset([]);
+    // ДЗ #24: POST /orders тепер захищений. Контракт marketplace-web записано ДО auth, тож
+    // мінтимо валідний токен тим самим ключем застосунку й інжектимо його в requestFilter.
+    authHeader = `Bearer ${app.get(TokenService).signAccess('1', 'buyer', randomUUID()).token}`;
     await app.listen(PORT);
   });
 
@@ -43,6 +49,15 @@ describe('contract: provider verification (marketplace-api)', () => {
       provider: PROVIDER,
       providerBaseUrl: `http://127.0.0.1:${PORT}`,
       providerVersion: PROVIDER_VERSION,
+      // Інжектимо Authorization у КОЖЕН верифікований запит. Контракт перевіряє ФОРМУ
+      // відповіді (схему Order, статус, Content-Type), а не автентифікацію — тож даємо
+      // валідний токен, щоб захищений POST /orders віддав 201, а не 401 (стандартний
+      // патерн Pact для провайдерів за auth). Для публічного GET /products заголовок зайвий,
+      // але нешкідливий.
+      requestFilter: (req, _res, next) => {
+        req.headers['authorization'] = authHeader;
+        next();
+      },
       // stateHandlers РЕАЛЬНО сідять стан у стор, який читає провайдер (in-memory):
       // каталог стартував порожнім, тож без цього сіду GET /products/prod_1 дав би 404
       // і верифікація впала б — стан справді щось встановлює, а не покладається на дефолт.
