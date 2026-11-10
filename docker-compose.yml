@@ -134,5 +134,40 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── S3-сумісне сховище (ДЗ #26). MinIO: той самий S3-API, локально й безкоштовно.
+  # Дані у tmpfs (кожен `down` — чистий аркуш) з size=1g: на 256m контейнер вмирає посеред
+  # multipart-серії, і критерії червоніють не через код. Креди — дев-креденшели стенда (не
+  # секрет), за замовчуванням збігаються зі значеннями у ## Grading; реальні — зі сховища #11.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${STORAGE_ACCESS_KEY:-hw26user}
+      MINIO_ROOT_PASSWORD: ${STORAGE_SECRET_KEY:-hw26secretpass}
+    ports:
+      - '${STORAGE_PORT:-22650}:9000'        # S3 API — застосунок/демо
+      - '${STORAGE_CONSOLE_PORT:-22651}:9001' # web-консоль
+    tmpfs:
+      - /data:size=1g
+
+  # Створює ПРИВАТНИЙ бакет (anonymous → 403: саме це доводить demo:cdn direct=403) і виходить.
+  # `up --wait` чекає його успішного виходу — це і є сигнал готовності сховища (until-цикл
+  # тримається, доки MinIO не почне приймати зʼєднання). MC_HOST_local конфігурує alias без mc alias set.
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MC_HOST_local: http://${STORAGE_ACCESS_KEY:-hw26user}:${STORAGE_SECRET_KEY:-hw26secretpass}@minio:9000
+      BUCKET: ${STORAGE_BUCKET:-hw26-files}
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - >
+        until mc ls local >/dev/null 2>&1; do echo 'waiting minio...'; sleep 1; done;
+        mc mb --ignore-existing local/$$BUCKET;
+        mc anonymous set none local/$$BUCKET;
+        echo "bucket $$BUCKET ready (private)";
+
 volumes:
   pgdata:

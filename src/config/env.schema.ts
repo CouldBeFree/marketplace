@@ -61,6 +61,19 @@ export const envSchema = z.object({
   REFRESH_TOKEN_PEPPER: z
     .string({ required_error: 'REFRESH_TOKEN_PEPPER is required (зі сховища)' })
     .min(16, 'REFRESH_TOKEN_PEPPER must be at least 16 chars'),
+
+  // ── ДЗ #26: об'єктне сховище (S3-сумісне: MinIO локально) ───────────────────
+  // Креденшели — зі сховища #11 (право читати/писати всі файли; ціна витоку інша, ніж у
+  // DATABASE_URL). ОПЦІЙНІ: HTTP-застосунок і тести стартують без них; demo:upload/multipart/cdn
+  // fail-fast без них. STORAGE_ENDPOINT порожній → справжній AWS S3; заданий → емулятор (path-style).
+  STORAGE_ENDPOINT: z
+    .string()
+    .url('STORAGE_ENDPOINT must be a valid http(s):// URL')
+    .optional(),
+  STORAGE_ACCESS_KEY: z.string().min(1).optional(),
+  STORAGE_SECRET_KEY: z.string().min(1).optional(),
+  STORAGE_BUCKET: z.string().min(1).optional(),
+  STORAGE_REGION: z.string().min(1).default('us-east-1'),
 });
 
 export type Env = z.infer<typeof envSchema>;
