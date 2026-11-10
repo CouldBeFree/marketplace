@@ -126,6 +126,8 @@ paths:
                 $ref: '#/components/schemas/OrderList'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
     post:
       operationId: createOrder
       summary: Створити замовлення

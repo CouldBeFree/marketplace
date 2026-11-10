@@ -468,6 +468,10 @@ export SKIP_VAULT=1                 # у грейдера немає досту�
 # застосунок ходить ЧЕРЕЗ PgBouncer (порт 6432), а не напряму в Postgres
 export DB_URL=postgres://marketplace:marketplace_dev_pw@127.0.0.1:6432/marketplace
 export DATABASE_URL="$DB_URL"       # ops-скрипти (backup/restore-drill) читають DATABASE_URL
+# ДЗ #11 — пароль БД у файлі-секреті: DatabaseModule (пул застосунку) бере пароль ЗВІДСИ, не з
+# DB_URL. Без цього файла auth-демо (ДЗ #24) піднімають AppModule і падають ENOENT. Значення
+# збігається з паролем ролі в DB_URL вище.
+mkdir -p secrets && printf '%s' 'marketplace_dev_pw' > secrets/db_password
 # ДЗ #19 — адреса брокера подій (дев-креди локального RabbitMQ з docker-compose, не секрет)
 export BROKER_URL=amqp://app:app@127.0.0.1:5672
 # ДЗ #23 — два інстанси Redis: кеш (allkeys-lru) і черга+сесії+ліміт (noeviction)

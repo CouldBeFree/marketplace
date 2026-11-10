@@ -3,6 +3,7 @@ import {
   cleanAndSeed,
   makeClient,
   poolOf,
+  portOf,
   forgeTampered,
   printAndExit,
   DemoUser,
@@ -14,7 +15,6 @@ import {
 //  (продавець) — RBAC рівня ролі. tampered=401 — підмінений payload зі старим підписом;
 //  рішення на jwt.decode() віддало б тут 201, а не 401.
 //  Очікуємо: anon=401 own=200 foreign=403 role-denied=403 role-allowed=200|201 tampered=401.
-const PORT = 3103;
 const BUYER: DemoUser = { email: 'buyer-rbac@auth.local', password: 'buyer-rbac-pw', role: 'buyer' };
 const BUYER2: DemoUser = { email: 'buyer2-rbac@auth.local', password: 'buyer2-rbac-pw', role: 'buyer' };
 const SELLER: DemoUser = { email: 'seller-rbac@auth.local', password: 'seller-rbac-pw', role: 'seller' };
@@ -25,9 +25,9 @@ async function login(http: ReturnType<typeof makeClient>, u: DemoUser): Promise<
 }
 
 async function main(): Promise<void> {
-  const app = await bootApp(PORT);
+  const app = await bootApp();
   await cleanAndSeed(poolOf(app), [BUYER, BUYER2, SELLER]);
-  const http = makeClient(PORT);
+  const http = makeClient(portOf(app));
   const r: Record<string, number> = {};
 
   try {

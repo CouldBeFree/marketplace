@@ -1,4 +1,4 @@
-import { bootApp, cleanAndSeed, makeClient, poolOf, printAndExit, DemoUser } from './demo-util';
+import { bootApp, cleanAndSeed, makeClient, poolOf, portOf, printAndExit, DemoUser } from './demo-util';
 
 // demo:reuse ⭐ — СЕРЦЕ ДЗ. Повторне використання refresh валить УСЮ сімʼю.
 //  r1-refresh=200: чесна ротація (R0 → R1).
@@ -7,13 +7,12 @@ import { bootApp, cleanAndSeed, makeClient, poolOf, printAndExit, DemoUser } fro
 //  всю сімʼю. Саме це відрізняє ротацію ВІД ротації з детекцією: r1-reuse=401 вміє й ротація
 //  без сімʼї, а r2-after-reuse=401 — ні (RFC 9700 §4.14.2).
 //  Очікуємо: login=200 r1-refresh=200 r1-reuse=401 r2-after-reuse=401.
-const PORT = 3102;
 const USER: DemoUser = { email: 'buyer-reuse@auth.local', password: 'buyer-reuse-pw', role: 'buyer' };
 
 async function main(): Promise<void> {
-  const app = await bootApp(PORT);
+  const app = await bootApp();
   await cleanAndSeed(poolOf(app), [USER]);
-  const http = makeClient(PORT);
+  const http = makeClient(portOf(app));
   const r: Record<string, number> = {};
 
   try {

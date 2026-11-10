@@ -26,9 +26,16 @@ export class OrdersController {
     private readonly events: OrderEventsService,
   ) {}
 
+  // Список замовлень — лише автентифікованим, і покупець бачить ЛИШЕ свої (admin — усі).
+  // Раніше був без гарда: анонім діставав 200 з чужими замовленнями.
   @Get()
-  list(@Query('limit') limit?: string, @Query('cursor') cursor?: string) {
-    return this.orders.list(limit === undefined ? undefined : Number(limit), cursor);
+  @UseGuards(JwtAuthGuard)
+  list(
+    @CurrentUser() user: AccessClaims,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    return this.orders.list(limit === undefined ? undefined : Number(limit), cursor, user);
   }
 
   // RBAC рівня ВЛАСНОСТІ. Це НЕ гард: гард стоїть до завантаження ресурсу й даних про власника
@@ -62,9 +69,19 @@ export class OrdersController {
     return order;
   }
 
-  // Зміна статусу — тригер realtime-події. Сам emit робить OrdersService (бізнес-логіка).
+  // Зміна статусу — тригер realtime-події. Лише автентифікованим і лише на СВОЄ замовлення
+  // (admin — на будь-яке). Раніше без гарда: анонім міняв статус чужого замовлення й діставав 200.
   @Patch(':id/status')
-  changeStatus(@Param('id') id: string, @Body() body: { status: string }) {
+  @UseGuards(JwtAuthGuard)
+  changeStatus(
+    @Param('id') id: string,
+    @Body() body: { status: string },
+    @CurrentUser() user: AccessClaims,
+  ) {
+    this.orders.get(id); // 404, якщо немає (перевіряємо ДО власності, як у GET /:id)
+    if (user.role !== 'admin' && this.orders.ownerOf(id) !== user.sub) {
+      throw new ForbiddenException('not your order');
+    }
     return this.orders.changeStatus(id, body.status);
   }
 

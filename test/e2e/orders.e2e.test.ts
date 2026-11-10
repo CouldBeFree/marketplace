@@ -69,4 +69,24 @@ describe('E2E orders (supertest, повний Nest)', () => {
       .send({ items: [{ product_id: 'prod_1', quantity: 1 }] })
       .expect(401);
   });
+
+  // Fix рев'ю #15: GET /orders та PATCH /:id/status раніше були без гарда → анонім діставав 200.
+  it('негатив: GET /orders (список) без токена → 401', async () => {
+    await request(app.getHttpServer()).get('/orders').expect(401);
+  });
+
+  it('список замовлень під токеном → 200 (лише свої)', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/orders')
+      .set('Authorization', auth)
+      .expect(200);
+    expect(Array.isArray(res.body.items)).toBe(true);
+  });
+
+  it('негатив: PATCH /orders/:id/status без токена → 401', async () => {
+    await request(app.getHttpServer())
+      .patch('/orders/order_1/status')
+      .send({ status: 'paid' })
+      .expect(401);
+  });
 });

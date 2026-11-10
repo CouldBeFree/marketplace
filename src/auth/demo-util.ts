@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import type { AddressInfo } from 'net';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import type { Pool } from 'pg';
@@ -14,9 +15,11 @@ export interface DemoUser {
   role: Role;
 }
 
-// Піднімає ПОВНИЙ Nest (той самий конфіг, що й прод: attachPreInit/attachPostInit) на своєму
-// порту. logger лишаємо на warn/error — щоб видно було лог детекції повтору, але без шуму роутів.
-export async function bootApp(port: number): Promise<NestExpressApplication> {
+// Піднімає ПОВНИЙ Nest (той самий конфіг, що й прод: attachPreInit/attachPostInit). Порт — 0
+// (ефемерний, ОС дає вільний), тож демо ніколи не ловить EADDRINUSE від лишку попереднього
+// прогону; фактичний порт читаємо через portOf. AUTH_DEMO_PORT дозволяє зафіксувати явно.
+// logger лишаємо на warn/error — щоб видно було лог детекції повтору, але без шуму роутів.
+export async function bootApp(): Promise<NestExpressApplication> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
     logger: ['warn', 'error'],
@@ -24,8 +27,12 @@ export async function bootApp(port: number): Promise<NestExpressApplication> {
   attachPreInit(app);
   await app.init();
   attachPostInit(app);
-  await app.listen(port);
+  await app.listen(Number(process.env.AUTH_DEMO_PORT) || 0);
   return app;
+}
+
+export function portOf(app: NestExpressApplication): number {
+  return (app.getHttpServer().address() as AddressInfo).port;
 }
 
 export function poolOf(app: NestExpressApplication): Pool {
