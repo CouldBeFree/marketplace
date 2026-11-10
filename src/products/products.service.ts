@@ -9,9 +9,23 @@ export class ProductsService {
     { id: 'prod_2', name: 'Електрочайник', price_cents: 1500, currency: 'UAH' },
     { id: 'prod_3', name: 'Кухоль', price_cents: 300, currency: 'UAH' },
   ];
+  private seq = this.products.length; // наступний id — prod_4, prod_5, …
 
   list(limit?: number, cursor?: string) {
     return paginate(this.products, limit, cursor);
+  }
+
+  // ДЗ #24: запис у каталог дозволено лише seller/admin (гейтить RolesGuard у контролері).
+  // Сам сервіс ролей не знає — межа ролі вже пройдена гардом до цього виклику.
+  create(input: { name: string; price_cents: number; currency?: string }): Product {
+    const product: Product = {
+      id: `prod_${++this.seq}`,
+      name: input.name,
+      price_cents: input.price_cents,
+      currency: input.currency ?? 'UAH',
+    };
+    this.products.push(product);
+    return product;
   }
 
   find(id: string): Product | undefined {

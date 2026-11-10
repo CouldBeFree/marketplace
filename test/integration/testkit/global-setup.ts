@@ -12,6 +12,8 @@ import { Init1789199398268 } from '../../../src/migrations/1789199398268-Init';
 import { Concurrency1789201579857 } from '../../../src/migrations/1789201579857-Concurrency';
 import { Outbox1792681513324 } from '../../../src/migrations/1792681513324-Outbox';
 import { IdempotencyResponse1793120051983 } from '../../../src/migrations/1793120051983-IdempotencyResponse';
+import { AuthUsers1793200000001 } from '../../../src/migrations/1793200000001-AuthUsers';
+import { RefreshTokens1793200000002 } from '../../../src/migrations/1793200000002-RefreshTokens';
 
 // Jest globalSetup: піднімає ОДИН postgres:16-alpine контейнер із КОДУ, накочує на
 // нього наші справжні міграції (ДЗ #13–14) і віддає connection URI тестам через
@@ -30,6 +32,8 @@ module.exports = async (): Promise<void> => {
       Concurrency1789201579857,
       Outbox1792681513324,
       IdempotencyResponse1793120051983,
+      AuthUsers1793200000001,
+      RefreshTokens1793200000002,
     ],
   });
   await ds.initialize();

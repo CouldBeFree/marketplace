@@ -26,8 +26,14 @@ export class OrdersService {
     private readonly events: OrderEventsService,
   ) {}
 
-  list(limit?: number, cursor?: string) {
-    return paginate(this.orders, limit, cursor);
+  // Покупець бачить лише свої замовлення (фільтр за owner-мапою); admin — усі. Власність —
+  // у сервісі (там, де є дані про власника), не в гарді.
+  list(limit: number | undefined, cursor: string | undefined, viewer: { sub: string; role: string }) {
+    const visible =
+      viewer.role === 'admin'
+        ? this.orders
+        : this.orders.filter((o) => this.owners.get(o.id) === viewer.sub);
+    return paginate(visible, limit, cursor);
   }
 
   get(id: string): Order {

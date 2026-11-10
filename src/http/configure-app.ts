@@ -16,9 +16,9 @@ export function attachPreInit(app: NestExpressApplication): void {
       apiSpec: resolveFromRoot('openapi/openapi.yaml'),
       validateRequests: true,
       validateResponses: true,
-      // realtime-шляхи поза REST-контрактом: health, socket.io handshake,
-      // SSE-потік подій і зміна статусу (їх у openapi.yaml немає навмисно)
-      ignorePaths: /\/health|\/socket\.io|\/orders\/[^/]+\/(events|status)/,
+      // шляхи поза REST-контрактом: health, socket.io handshake, SSE-потік подій і зміна
+      // статусу, а також /auth/* (ДЗ #24 — обмін токенами, не ресурс; валідатор їх не чіпає)
+      ignorePaths: /\/health|\/socket\.io|\/auth(\/|$)|\/orders\/[^/]+\/(events|status)/,
     }),
   );
   app.useGlobalFilters(new ProblemJsonFilter());

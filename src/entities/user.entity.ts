@@ -25,6 +25,14 @@ export class User {
   @Column({ type: 'text', name: 'full_name' })
   fullName: string;
 
+  // ДЗ #24: роль — ДЖЕРЕЛО ПРАВДИ для RBAC (у токені вона лише кеш до exp).
+  @Column({ type: 'text', default: 'buyer' })
+  role: 'buyer' | 'seller' | 'admin';
+
+  // ДЗ #24: scrypt-хеш пароля (node:crypto), не голий пароль. Nullable — сід-юзери без логіну.
+  @Column({ type: 'text', name: 'password_hash', nullable: true })
+  passwordHash: string | null;
+
   // баланс покупця в копійках; списання при checkout — UPDATE ... WHERE balance_cents >= $sum
   @Column({ type: 'integer', name: 'balance_cents', default: 0 })
   balanceCents: number;
