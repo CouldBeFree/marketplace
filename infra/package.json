@@ -1,0 +1,15 @@
+{
+  "name": "hw28-infra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ДЗ #28 — Pulumi-програма: zero-downtime rollout на kind",
+  "main": "index.ts",
+  "dependencies": {
+    "@pulumi/kubernetes": "^4.0.0",
+    "@pulumi/pulumi": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

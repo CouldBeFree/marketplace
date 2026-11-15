@@ -1,0 +1,30 @@
+name: image-scan (ДЗ #28)
+
+# Той самий скрипт ворітного сканування (scripts/scan.mjs), але з РОБОЧИМ порогом — його читає
+# людина. Критерій 4 натомість ганяє цей скрипт із SCAN_MAX=-1/99999, щоб перевірити, що вердикт
+# ОБЧИСЛЮЄТЬСЯ. Зелений образ тут не вимагається: навіть distroless дає виправні CRITICAL/HIGH,
+# а база сканера оновлюється щодоби.
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: build production image (BuildKit-секрет)
+        run: |
+          printf 'dummy-npm-token' > .npm_token
+          npm run image:build
+      - name: install trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      - name: scan gate (робочий поріг)
+        env:
+          SCAN_IMAGE: hw28-app:v1
+          SCAN_SEVERITY: CRITICAL,HIGH
+          SCAN_MAX: '25' # робочий поріг для людини; вердикт рахується зі знахідок, не друкується
+        run: npm run scan
