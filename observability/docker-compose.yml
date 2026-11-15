@@ -1,0 +1,27 @@
+# Стенд спостережуваності ДЗ #29 — all-in-one grafana/otel-lgtm (Prometheus + Grafana + Tempo +
+# OTLP-приймач в одному контейнері; найшвидший старт). Порти 22900–22999, щоб не зіткнутись зі
+# стендами попередніх ДЗ. Перед здачею: docker stats --no-stream — чи влазить разом із кластером #28.
+services:
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    container_name: hw29-otel-lgtm
+    ports:
+      - '${OTLP_GRPC_PORT:-22917}:4317' # OTLP gRPC
+      - '${OTLP_HTTP_PORT:-22918}:4318' # OTLP HTTP (OTEL_EXPORTER_OTLP_ENDPOINT)
+      - '${PROMETHEUS_PORT:-22901}:9090' # Prometheus (PROMETHEUS_URL)
+      - '${GRAFANA_PORT:-22903}:3000' # Grafana UI
+      - '${TEMPO_PORT:-22904}:3200' # Tempo trace API (TRACE_API_URL)
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    volumes:
+      # Дашборд RED + провіження датасорса/провайдера (конфігом, не руками).
+      - ./dashboards:/etc/grafana/dashboards:ro
+      - ./grafana/provisioning/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards:ro
+      - ./grafana/provisioning/datasources:/otel-lgtm/grafana/conf/provisioning/datasources:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:3000/api/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
