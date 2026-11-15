@@ -458,6 +458,97 @@ sender-constrained токен, або ротацію з детекцією — �
 Prod: `15615708e74d0ef4`. Різні відбитки = різні ключі в різних оточеннях: токен, підписаний
 dev-ключем, у проді не пройде верифікацію.
 
+## Files
+
+ДЗ #26 будує повний шлях файла — **прийняти → зберегти → віддати** — і на кожному кроці свідомо
+платить. Три механізми теми — це три застосування одного прийому: **коли скасувати дію дорого або
+неможливо, зроби так, щоб скасування було не потрібне.** Presigned не можна відкликати → робимо
+його коротким. Запис у CDN не дістати → робимо URL версійним. Обрив не попередити → робимо
+завантаження відновлюваним.
+
+**Змінні (джерело — колонка, яку читає людина й грейдер):**
+
+| Змінна | Джерело | Навіщо |
+|---|---|---|
+| `STORAGE_ACCESS_KEY` | сховище (#11) | ключ доступу до S3 (право читати/писати всі файли) |
+| `STORAGE_SECRET_KEY` | сховище (#11) | секрет доступу до S3 |
+| `STORAGE_BUCKET` | compose / оточення | імʼя бакета (дев-стенд) |
+| `STORAGE_ENDPOINT` | compose / оточення | ендпойнт S3 (MinIO локально; порожньо → справжній AWS S3) |
+| `STORAGE_REGION` | compose / оточення | регіон підпису SigV4 |
+
+Креденшели сховища — зі сховища #11, нових env-файлів не заводимо; усі три демо йдуть через
+`scripts/with-secrets.sh dev …`, аварійний вхід `SKIP_VAULT=1` вже в обгортці. Ціна витоку інша,
+ніж у `DATABASE_URL`: ключ доступу до сховища — це право писати й читати **всі** файли.
+
+**Двокроковий контракт завантаження.** `POST /uploads/intent` (під гардом #24) валідує
+`contentType` за allowlist, **сам генерує ключ** `uploads/{userId}/{uuid}.{ext}` і кладе рядок
+`PENDING`. 🔴 `filename` від клієнта у ключ **не потрапляє** — інакше клієнт дістав би право писати
+за будь-яким шляхом (`../../etc/passwd`). Клієнт кладе байти напряму у сховище за presigned URL.
+`POST /uploads/commit` робить `HeadObject` і звіряє, що обʼєкт існує (і розмір, якщо відомий) — без
+цього клієнт «комітить» те, чого не заливав; лише тоді `COMPLETED`.
+
+**Строк presigned — свідоме число.** `PUT`-presigned живе **300с (5 хв)**: сценарій — аватарка з
+форми, яку заливають одразу, а не за тиждень. Presigned **не можна відкликати** (ні `jti`, ні
+реєстру — жодна зі стратегій #24, крім короткого строку, не діє), тож короткий строк — єдиний
+запобіжник проти витоку URL. Для видачі файла є `GET /files/:id` → **302** на свіжий presigned на
+**60с**: гард працює на кожен запит (сервіс лишається в шляху АВТОРИЗАЦІЇ), але не в шляху ДАНИХ.
+
+**Multipart — поріг і розмір частини РАХУЄМО, не вписуємо.** Частин максимум 10 000, тож
+`partSize = max(5 МіБ, ceil(size / 10000))` (5 МіБ — мінімум S3 на всі частини, крім останньої).
+Поріг — `> 10 МіБ` → multipart. Відновлення: новий процес питає `ListParts`, бачить уже залиті
+частини й доливає **лише відсутнє** (демо: 3 частини, обрив після 2 → доливається 1). До `Complete`
+обʼєкта не існує (`HeadObject` → 404), хоча частини лежать; після — розмір збігається, а `ETag`
+має суфікс `-N` (кількість частин, **не MD5** файла).
+
+**CDN — обрана форма: локальний edge-шим.** `src/storage/edge.ts` (~40 рядків) бере обʼєкт зі
+сховища **своїми** кредами, кладе в кеш і віддає з `X-Cache: HIT|MISS`. Це і є суть OAC: до сховища
+ходить edge, а не публіка — прямий анонімний запит у бакет дає **403**. Кешуємо лише коли origin дав
+`Cache-Control` (інакше нема чого кешувати → `cache-hit=0`); заголовок ставиться **на обʼєкт при
+завантаженні** (`public, max-age=31536000, immutable`), не в edge.
+
+**Оновлення без інвалідації.** Імʼя публічного ассета містить **хеш вмісту** (`app.15c42ab7.css`).
+Після «деплою» новий вміст приїжджає під **новим URL**, старий запис у кеші нікому не заважає,
+інвалідацій — **нуль**. Мутабельне імʼя (`app.css`) дало б `new-name=0` і `content-changed=0`.
+
+**Bucket policy для AWS-варіанту (CloudFront + OAC).** Якщо здавати на справжньому CloudFront,
+бакет закривається для публіки й відкривається лише цій дистрибуції — через `Condition` з
+`AWS:SourceArn` (без нього ти дозволив доступ **будь-якій** дистрибуції у світі):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "AllowCloudFrontOAC",
+    "Effect": "Allow",
+    "Principal": { "Service": "cloudfront.amazonaws.com" },
+    "Action": "s3:GetObject",
+    "Resource": "arn:aws:s3:::hw26-files/*",
+    "Condition": {
+      "StringEquals": {
+        "AWS:SourceArn": "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/<DIST_ID>"
+      }
+    }
+  }]
+}
+```
+
+**Гігієна й борги (не оцінюється, але варте абзацу).** `commit` не косметичний: без нього
+накопичуються «файли-сироти» (`PENDING` без байтів) — їх добиває cleanup-джоба (BullMQ з #23) для
+старших за добу: `AbortMultipartUpload → DeleteObject → видалити рядок`. Незавершений multipart
+тарифікується, хоча обʼєкта не видно — тому на бакет варто правило lifecycle
+`AbortIncompleteMultipartUpload: 7 днів`. Приватний контент у проді віддають не голим presigned у
+листі (його відкриють через тиждень, а відкликати не можна), а CloudFront **signed URL / signed
+cookies** — це план на потім. І борг #15: призначення для дампів — тепер обʼєктне сховище, але
+lifecycle не робить бекап перевіреним, restore-drill нікуди не дівається.
+
+**Числа трьох прогонів** (детерміновані — HTTP-статуси й лічильники):
+
+```
+demo:upload     intent=200 key-from-server=1 api-alive=0 put-offline=200 commit=200 commit-without-bytes=409 tampered=403 expired=403
+demo:multipart  head-before-complete=404 resumed-parts=1 complete=200 size-match=1 etag-multipart=1
+demo:cdn        direct=403 edge-miss=200 edge-hit=200 cache-hit=1 new-name=1 new-url=200 content-changed=1
+```
+
 ## Grading
 
 Свіжий клон, чиста БД, без доступу до сховища. Виконати в корені репо:
@@ -491,6 +582,15 @@ export JWT_KID=grader
 export JWT_PRIVATE_KEY="$(cat /tmp/priv.b64)"
 export JWT_PUBLIC_KEY="$(cat /tmp/pub.b64)"
 export REFRESH_TOKEN_PEPPER=grader-pepper-at-least-16-bytes
+
+# ДЗ #26 — об'єктне сховище (локальний MinIO; значення збігаються з дефолтами docker-compose,
+# тож MinIO стартує саме з цими кредами й створює приватний бакет). Для справжнього S3 —
+# прибери STORAGE_ENDPOINT і постав AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION + свій бакет.
+export STORAGE_ENDPOINT=http://127.0.0.1:22650
+export STORAGE_ACCESS_KEY=hw26user
+export STORAGE_SECRET_KEY=hw26secretpass
+export STORAGE_BUCKET=hw26-files
+export STORAGE_REGION=us-east-1
 
 npm ci
 npm run build
@@ -530,6 +630,12 @@ npm run demo:queue      # completed=1 added=2 queued=1 queue-noeviction=1 (ре�
 npm run demo:auth    # login=200 no-token=401 with-token=200 refresh=200 logout=200 after-logout=401 refresh-after-logout=401
 npm run demo:reuse   # login=200 r1-refresh=200 r1-reuse=401 r2-after-reuse=401  (⭐ повтор валить усю сімʼю)
 npm run demo:rbac    # anon=401 own=200 foreign=403 role-denied=403 role-allowed=201 tampered=401
+
+# ДЗ #26 — файли: presigned-завантаження, multipart із довантаженням, CDN перед закритим бакетом
+#          (демо самоочисні; minio+minio-setup підняв `docker compose up -d --wait` вище)
+npm run demo:upload     # intent=200 key-from-server=1 api-alive=0 put-offline=200 commit=200 commit-without-bytes=409 tampered=403 expired=403
+npm run demo:multipart  # head-before-complete=404 resumed-parts=1 complete=200 size-match=1 etag-multipart=1   (двічі поспіль)
+npm run demo:cdn        # direct=403 edge-miss=200 edge-hit=200 cache-hit=1 new-name=1 new-url=200 content-changed=1
 ```
 
 > Дев-креденшели ролі `marketplace`/`marketplace_dev_pw` (їх створює `init.sql`) —

@@ -17,8 +17,9 @@ export function attachPreInit(app: NestExpressApplication): void {
       validateRequests: true,
       validateResponses: true,
       // шляхи поза REST-контрактом: health, socket.io handshake, SSE-потік подій і зміна
-      // статусу, а також /auth/* (ДЗ #24 — обмін токенами, не ресурс; валідатор їх не чіпає)
-      ignorePaths: /\/health|\/socket\.io|\/auth(\/|$)|\/orders\/[^/]+\/(events|status)/,
+      // статусу, /auth/* (ДЗ #24 — обмін токенами), /uploads та /files/* (ДЗ #26 — протокол
+      // завантаження й редірект на presigned, не ресурс). Валідатор спеки їх не чіпає.
+      ignorePaths: /\/health|\/socket\.io|\/auth(\/|$)|\/uploads(\/|$)|\/files(\/|$)|\/orders\/[^/]+\/(events|status)/,
     }),
   );
   app.useGlobalFilters(new ProblemJsonFilter());
