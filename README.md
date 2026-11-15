@@ -620,6 +620,66 @@ demo:rollout   profile=zero-downtime requests=<≥5000> ok=<=requests> failed=0 
 demo:pdb       healthy=2 minAvailable=1 evict-1=201 evict-2=429
 ```
 
+## Observability
+
+Курсовий їде в кластері (#28). Тепер питання: «о 03:15 один запит віддав 500 — скільки часу
+потрібно, щоб сказати, що саме сталося». Відповідь — хвилина, а не вечір: три стовпи
+(логи / метрики / трейси) звʼязані **одним ключем** — `trace_id`. Обсервабельність не збільшує час
+між відмовами, вона ріже час відновлення (MTTR у знаменнику `MTBF / (MTBF + MTTR)`).
+
+**Змінні (адреси стенда зі сховища #11):**
+
+| Змінна | Джерело | Навіщо |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | сховище (#11) | колектор трейсів (прод-режим OTel; демо — in-memory) |
+| `PROMETHEUS_URL` | сховище (#11) | адреса Prometheus стенда |
+| `TRACE_API_URL` | сховище (#11) | адреса трейс-беку (Tempo) |
+| `GRAFANA_USER` / `GRAFANA_PASSWORD` | сховище (#11) | креденшели Grafana |
+
+**Стек — grafana/otel-lgtm** (all-in-one: Prometheus + Grafana + Tempo + OTLP-приймач в одному
+контейнері, `observability/docker-compose.yml`). Порти 22900–22999. Демо **самодостатні**: OTel з
+in-memory span-exporter, скрейп `/metrics` напряму, перехоплений stdout логів — стенд потрібен лише
+для дашборда. Перед здачею: `docker stats --no-stream` — чи влазить разом із кластером #28.
+
+**Логи — pino, корелятор із КОНТЕКСТУ.** Кожен рядок — JSON; жодна функція не приймає `req` заради
+логування. `trace_id` у mixin береться з **активного спана OTel** (`trace.getActiveSpan()?.spanContext().traceId`),
+а не власний uuid — інакше `trace-matches-log` ніколи не пройшов би. `userId` (#24), `tenant`,
+`idempotencyKey` (#22) живуть в `AsyncLocalStorage` (не в аргументах — тому 8 паралельних запитів не
+змішуються). Поле `layer` називає компонент (`orders.controller` → `orders.service` → `orders.repo`),
+усі три шари з тим самим `trace_id`. **Redaction** явними шляхами (`headers.authorization`,
+`body.password`): redact не вгадує шляхи, тож перелічено точно ті місця, куди кладемо чутливе.
+
+**Метрики RED** (`prom-client`): лічильник `http_requests_total{method,route,status}` (Rate + Errors
+через фільтр 5xx) і гістограма `http_request_duration_seconds` (Duration). 🔴 `route` — **шаблон**
+(`/orders/:id`), не сирий шлях: інакше сто різних id дали б сто рядів.
+
+**Межі бакетів.** `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5]` — верхній **скінченний**
+`le=5с` більший за найгірший випадок демо (повільний ендпоїнт ~0.03с + накладні). Інакше
+`histogram_quantile` упреться в межу й покаже здорову лінію саме тоді, коли все погано; тому
+`above-top-bucket = _count − _bucket{le="5"} = 0`.
+
+**OTel** на тому самому ендпоїнті: вхідний `traceparent` **продовжується** (явний W3C-пропагатор),
+запит із 5xx дає спан зі статусом **ERROR** (для 4xx OTel лишає Unset — тому демо ронить саме 5xx).
+`requireParentforOutgoingSpans` вимикає клієнтські спани без батька, щоб у демо ручний `traceparent`
+не перезаписувався власним.
+
+**Дашборд — `observability/dashboards/red.json`** (3 панелі на три питання RED); датасорс
+провіжниться `observability/grafana/provisioning/`:
+
+| Панель | PromQL | Питання RED |
+|---|---|---|
+| Rate | `sum(rate(http_requests_total[1m])) by (route)` | скільки запитів/с |
+| Errors | `sum(rate(http_requests_total{status=~"5.."}[1m])) by (route)` | скільки з них падає |
+| Duration | `histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, route))` | як довго |
+
+**Числа трьох прогонів** (детерміновані — рахуються, не друкуються):
+
+```
+demo:logs     non-json-lines=0 layers=3 distinct-trace-ids=1 trace-id-matches-header=1 burst=8 burst-trace-ids=8 burst-uneven=0 secret-req-logged=1 secret-in-logs=0
+demo:metrics  sent-ok=100 sent-fail=30 counter-delta=130 errors-delta=30 above-top-bucket=0 series-before=1 series-after=1
+demo:trace    spans=2 orphan-spans=0 trace-matches-header=1 trace-matches-log=1 span-status-error=1
+```
+
 ## Grading
 
 Свіжий клон, чиста БД, без доступу до сховища. Виконати в корені репо:
@@ -745,6 +805,23 @@ npm run destroy && npm run cluster:down
 > `kind load docker-image` (у `cluster:up`) обовʼязковий: образ, зібраний на хості, у кластері не
 > існує — без завантаження под повисне в `ErrImagePull`. Один кластер за раз; kind і minikube на
 > ~4 ГіБ одночасно не живуть.
+
+**ДЗ #29 (Observability)** — демо самодостатні (in-memory-експортер, скрейп `/metrics`,
+перехоплений stdout); стенд потрібен лише для дашборда. Виконати в корені репо:
+
+```bash
+docker compose -f observability/docker-compose.yml up -d --wait   # стенд otel-lgtm
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:22918          # ← ІМЕНА ЗМІННИХ ТВОЇ
+export PROMETHEUS_URL=http://127.0.0.1:22901
+export TRACE_API_URL=http://127.0.0.1:22904
+export SKIP_VAULT=1                                                # у грейдера немає сховища
+npm ci
+npm run demo:logs     # non-json-lines=0 layers=3 distinct-trace-ids=1 trace-id-matches-header=1 burst=8 burst-trace-ids=8 burst-uneven=0 secret-req-logged=1 secret-in-logs=0
+npm run demo:metrics  # counter-delta=sent errors-delta=sent-fail above-top-bucket=0 series-after=series-before
+npm run demo:trace    # spans=2 orphan-spans=0 trace-matches-header=1 trace-matches-log=1 span-status-error=1
+# дашборд: Grafana http://127.0.0.1:22903 (admin/admin), дашборд «Marketplace RED»
+docker compose -f observability/docker-compose.yml down   # прибрати
+```
 
 ## Міграції (без `synchronize`)
 

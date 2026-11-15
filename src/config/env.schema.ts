@@ -74,6 +74,17 @@ export const envSchema = z.object({
   STORAGE_SECRET_KEY: z.string().min(1).optional(),
   STORAGE_BUCKET: z.string().min(1).optional(),
   STORAGE_REGION: z.string().min(1).default('us-east-1'),
+
+  // ── ДЗ #29: спостережуваність (адреси стенда зі сховища #11) ─────────────────
+  // ОПЦІЙНІ: застосунок і демо стартують без них (демо використовують in-memory-експортер).
+  // OTEL_EXPORTER_OTLP_ENDPOINT — колектор трейсів (прод-режим OTel); PROMETHEUS_URL / TRACE_API_URL —
+  // для запитів до стенда (дашборд/перевірки).
+  OTEL_EXPORTER_OTLP_ENDPOINT: z
+    .string()
+    .url('OTEL_EXPORTER_OTLP_ENDPOINT must be a valid http(s):// URL')
+    .optional(),
+  PROMETHEUS_URL: z.string().url('PROMETHEUS_URL must be a valid URL').optional(),
+  TRACE_API_URL: z.string().url('TRACE_API_URL must be a valid URL').optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
