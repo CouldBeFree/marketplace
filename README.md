@@ -549,6 +549,77 @@ demo:multipart  head-before-complete=404 resumed-parts=1 complete=200 size-match
 demo:cdn        direct=403 edge-miss=200 edge-hit=200 cache-hit=1 new-name=1 new-url=200 content-changed=1
 ```
 
+## Kubernetes
+
+ДЗ #28 змінює питання до курсового: не «чи запуститься образ» (#5), а «чи переживе він оновлення
+під навантаженням». Відповідь на «у вас zero-downtime деплой?» має рівно одну чесну форму —
+**число**: `failed=0` з лічильника, який рахує коди відповідей, а не «я поставив проби».
+
+**Змінні (джерело — колонка, яку читають критерії 5 і 10):**
+
+| Змінна | Джерело | Навіщо |
+|---|---|---|
+| `APP_DB_PASSWORD` | сховище (#11) | пароль застосунку; їде в K8s Secret, у Deployment лише `secretKeyRef` |
+| `PULUMI_CONFIG_PASSPHRASE` | сховище (#11) | ключ шифрування стану Pulumi (файловий бекенд) |
+| `PULUMI_BACKEND_URL` | оточення / `scripts/pulumi.sh` | локальний файловий бекенд стану (`file://…`) — не секрет |
+
+Секрет приходить у програму через `scripts/with-secrets.sh` (та сама обгортка #11/#13); у коді
+`infra/index.ts` валідація — **перша дія**: без `APP_DB_PASSWORD` розгортання падає й називає
+змінну ще до звернення до кластера (жодного `?? "changeme"`).
+
+**Чим підіймав кластер і скільки памʼяті.** **kind**, одновузловий (`k8s/kind-config.yaml`), на
+машині з Docker ≈ 3.8 ГіБ. Вибір не смаковий: kind стартує ~10с і тримається ~520–545 МіБ, а
+minikube відмовляється стартувати з `--memory` меншим за 1800 МБ — на цій машині тісно. NodePort
+`30080` пробитий на хост через `extraPortMappings`, щоб генератор навантаження бив у сервіс напряму.
+
+**Образ.** Мультистейдж (`docker/Dockerfile`): builder `node:22-slim` → runtime
+`gcr.io/distroless/nodejs22-debian12:nonroot`. distroless тут не заради розміру, а заради того,
+чого бракує зловмиснику після RCE: **shell немає взагалі**. `USER 65532` **числом** — kubelet не
+резолвить імена, і `runAsNonRoot:true` + `nonroot` дало б `CreateContainerConfigError`.
+
+**Секрет етапу збірки ≠ секрет рантайму.** BuildKit-секрет (`--mount=type=secret`) живе під час
+`docker build` і захищає ОБРАЗ: токен приватного реєстру не осідає ні в history (на відміну від
+`ARG`), ні в шарах (на відміну від `COPY`+`rm`, що лишає whiteout, а байти — в попередньому шарі).
+K8s Secret живе в рантаймі й захищає РЕПОЗИТОРІЙ: пароль не доїжджає в git. Жоден не замінює іншого.
+⚠️ І `base64` у Secret — це не шифрування: у локальному etcd значення лежить відкрито, тож «поклав
+у Secret» означає «прибрав із git», а не «зашифрував».
+
+**Проби — дві, різні, на різні шляхи.** `readinessProbe → /readyz` («чи можна слати трафік»),
+`livenessProbe → /healthz` («чи треба вбити»). Ставити їх на один URL не можна: `liveness` на
+`/readyz` перетворила б «тимчасово не готовий» на нескінченний цикл рестартів.
+
+**Стратегія нуля** (чотири налаштування, що дають `failed=0`): `maxUnavailable:0` + `maxSurge:1`
+(не знімати старий под, поки новий не готовий); `terminationGracePeriodSeconds:15` > дренаж 5с (щоб
+SIGKILL не прилетів посеред дренажу); `readinessProbe` з коротким періодом; обробник SIGTERM, що
+**спершу** робить `/readyz` червоним, витримує дренаж, і **лише потім** `close()` — `close()` одразу
+відмовляв би новим зʼєднанням, поки endpoints ще містять под. Ціна нуля — час: коректний профіль
+викочується приблизно вдвічі-вчетверо довше за зламаний, бо `maxUnavailable:0` + дренаж на кожен под.
+
+**PDB лишає місце для обслуговування.** `minAvailable:1 < replicas:2` → `disruptionsAllowed:1` →
+перше виселення `201`, друге `429`. `minAvailable == replicas` блокувало б будь-який drain вузла
+(самообман «максимального захисту»); одна репліка + PDB — теж самообман, сенс зʼявляється від двох.
+І окремо: звичайний `kubectl delete pod` PDB **не** стримує — бюджет діє лише на Eviction API.
+
+**HPA — маніфестом** (`autoscaling/v2`, `minReplicas:2`, `maxReplicas:5`, метрика CPU 70%). 🔴 У
+kind **немає metrics-server**, тому HPA нічого не масштабує: `TARGETS` показує `cpu:<unknown>/70%`,
+а `REPLICAS` 0 — це очікувано. Саме тому `spec.replicas` лишається в програмі. **Конфлікт володіння
+полем:** у бойовому кластері з metrics-server у `replicas` пише і твоя Pulumi-програма, і HPA —
+кожен наступний `pulumi up` повертав би `replicas` до оголошеного, а HPA знову його міняв би. Там
+`replicas` з Deployment прибирають (лишають керування за HPA) або використовують `ignoreChanges`.
+
+**Промислові шляхи секрету** (не ставив у кластер, лише називаю): **ESO** (External Secrets
+Operator) синкає секрет зі зовнішнього сховища в K8s Secret оператором; **CSI** (Secrets Store CSI
+Driver) монтує його файлом у под, минаючи etcd. Обидва прибирають `with-secrets`-крок із людського
+циклу, але потребують оператора в кластері.
+
+**Числа трьох прогонів** (HTTP-статуси й лічильники, детерміновані):
+
+```
+demo:image     stages=2 shell-inside=0 runtime-uid=65532 token-in-history=0 token-in-config=0 token-in-layers=0
+demo:rollout   profile=zero-downtime requests=<≥5000> ok=<=requests> failed=0 rollout-seconds=<20..40>
+demo:pdb       healthy=2 minAvailable=1 evict-1=201 evict-2=429
+```
+
 ## Grading
 
 Свіжий клон, чиста БД, без доступу до сховища. Виконати в корені репо:
@@ -643,6 +714,37 @@ npm run demo:cdn        # direct=403 edge-miss=200 edge-hit=200 cache-hit=1 new-
 > Порти: PgBouncer — `${PGBOUNCER_PORT:-6432}`, Postgres — `${DB_PORT:-5432}`. Якщо
 > котрийсь зайнятий, підніми на інших (`DB_PORT=5441 PGBOUNCER_PORT=6432 docker compose
 > up -d --wait`) і встав порт PgBouncer у `DB_URL`/`DATABASE_URL`.
+
+**ДЗ #28 (Kubernetes)** — окремий, самодостатній прогін (кластера, не БД-стеку). Потрібні
+встановлені `docker`, `kind`, `kubectl`, `pulumi`, `trivy`. Виконати в корені репо:
+
+```bash
+export SKIP_VAULT=1                           # у грейдера немає доступу до сховища
+export APP_DB_PASSWORD=grader-secret          # ← ІМЕНА ЗМІННИХ ТВОЇ (секрет рантайму в K8s Secret)
+export PULUMI_BACKEND_URL="file://$PWD/.pulumi" # ЛОКАЛЬНИЙ файловий бекенд (інакше pulumi login)
+export PULUMI_CONFIG_PASSPHRASE=hw28-grading   # ключ шифрування стану Pulumi
+npm --prefix infra ci                          # залежності Pulumi-програми
+npx --prefix infra tsc --noEmit -p infra       # критерій 1: типізація без помилок
+
+printf 'dummy-npm-token' > .npm_token          # секрет етапу збірки; у git його немає
+npm run image:build                            # docker/Dockerfile -> hw28-app:v1 (BuildKit-секрет)
+npm run cluster:up                             # kind create + kind load docker-image
+npm run up                                     # pulumi up (через with-secrets: APP_DB_PASSWORD у Secret)
+
+# демо (числа — у ## Kubernetes):
+npm run demo:image      # stages=2 shell-inside=0 runtime-uid=65532 token-in-*=0
+SCAN_MAX=-1  npm run scan; echo "exit=$?"   # gate=fail, exit≠0
+SCAN_MAX=99999 npm run scan; echo "exit=$?" # gate=pass, exit 0
+npm run demo:rollout    # failed=0 при requests≥5000  ⭐
+npm run demo:pdb        # evict-1=201 evict-2=429
+
+# прибрати після перевірки:
+npm run destroy && npm run cluster:down
+```
+
+> `kind load docker-image` (у `cluster:up`) обовʼязковий: образ, зібраний на хості, у кластері не
+> існує — без завантаження под повисне в `ErrImagePull`. Один кластер за раз; kind і minikube на
+> ~4 ГіБ одночасно не живуть.
 
 ## Міграції (без `synchronize`)
 
