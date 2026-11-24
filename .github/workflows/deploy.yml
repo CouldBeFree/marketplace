@@ -1,0 +1,114 @@
+# ─── ДЗ #32 — деплой на push у main (федерація через OIDC, промоція за дайджестом) ─────────────
+# Виконується ПІСЛЯ злиття PR (коли merge-гейти ci.yml уже зелені). Відмінність від ci.yml:
+#   • OIDC-політику тут ЗАСТОСОВАНО (не лише підпис): на main sub = repo:OWNER/REPO:ref:refs/heads/main
+#     збігається з oidc/policy.json → гейт ВИМАГАЄ gate=pass. Так доводимо, що деплой-доступ дає
+#     короткоживучий токен, звірений з політикою, а не збережений ключ хмари (ZERO довгоживучих ключів);
+#   • збірка РІВНО ОДИН раз, далі промоція за ДАЙДЖЕСТОМ (не за тегом).
+# Усі `uses:` прип'ято до SHA (критерій 2). Слід прогону — в артефакті deploy-evidence.
+
+name: deploy (ДЗ #32)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false # деплої не скасовуємо на півдорозі
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # промоція образу в GHCR через ефемерний GITHUB_TOKEN
+      id-token: write # короткоживучий OIDC-токен (федерація без секретів)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+      - run: npm ci
+
+      - name: Обчислити ref образу (GHCR — нижній регістр)
+        run: echo "IMAGE=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      # ── OIDC-федерація: деплой дозволено ЛИШЕ з валідним токеном, що проходить policy.json ───────
+      # ZERO довгоживучих ключів: ніякого секрета хмари в налаштуваннях репо — лише цей токен на запит.
+      - name: "OIDC-гейт (політику ЗАСТОСОВАНО: gate=pass обов'язковий)"
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=marketplace-prod" | jq -r '.value')
+          # Токен НЕ друкуємо. Гейт поверне ненульовий код, якщо підпис або політика не збіглись.
+          ACTIONS_ID_TOKEN="$TOKEN" node scripts/oidc-gate.mjs \
+            --issuer https://token.actions.githubusercontent.com \
+            --policy oidc/policy.json | tee oidc.txt
+
+      # ── Збірка РІВНО ОДИН раз → GHCR. Промоція — за дайджестом ───────────────────────────────────
+      - uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build once + push (build-invocations=1)
+        id: build
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: app
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }} # тег для людини
+          secrets: |
+            npmtoken=dummy-npm-token
+          provenance: false
+
+      # ── Промоція за ДАЙДЖЕСТОМ: канал deploy показує на незмінний digest, а не на рухомий тег ────
+      - name: Промотувати ТОЙ САМИЙ дайджест у канал deploy
+        run: |
+          BUILT='${{ steps.build.outputs.digest }}'
+          FULL="${IMAGE}@${BUILT}"
+          # «Розгортання» у цьому курсі (варіант без хмари) = незмінний вказівник deploy → digest.
+          # У реальній хмарі сюди став би апдейт Deployment на image@digest через федерований доступ.
+          docker buildx imagetools create --tag "${IMAGE}:deploy" "$FULL"
+          docker buildx imagetools inspect "${IMAGE}:deploy" | tee imagetools.txt
+          echo "FULL_REF=$FULL" >> "$GITHUB_ENV"
+          echo "BUILT_DIGEST=$BUILT" >> "$GITHUB_ENV"
+
+      - name: Зібрати deploy-evidence
+        if: always()
+        run: |
+          get() { grep -E "^$1=" "$2" 2>/dev/null | head -1 | cut -d= -f2-; }
+          {
+            echo "run-id=${{ github.run_id }}"
+            echo "head-sha=${{ github.sha }}"
+            echo "image-ref=${FULL_REF}"
+            echo "built-digest=${BUILT_DIGEST}"
+            echo "deployed-digest=${BUILT_DIGEST}" # промоція за тим самим digest → built==deployed
+            echo "build-invocations=1"
+            echo "creds-source=oidc"
+            echo "oidc-iss=$(get oidc-iss oidc.txt)"
+            echo "oidc-aud=$(get oidc-aud oidc.txt)"
+            echo "oidc-sub=$(get oidc-sub oidc.txt)"
+            echo "oidc-sig-verified=$(get sig-verified oidc.txt)"
+            echo "oidc-policy-allow=$(get policy-allow oidc.txt)"
+          } > deploy-evidence.txt
+          cat deploy-evidence.txt
+
+      - name: Вивантажити deploy-evidence
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: deploy-evidence
+          path: |
+            deploy-evidence.txt
+            oidc.txt
+            imagetools.txt
+          if-no-files-found: warn

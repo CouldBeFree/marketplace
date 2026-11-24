@@ -1,0 +1,11 @@
+{
+  "_comment": "Політика довіри до OIDC-токена GitHub Actions (ДЗ #32, варіант «без хмари»). Гейт стоїть У ПАЙПЛАЙНІ перед деплоєм і доводить, що ми ЗМОГЛИ б федеруватись у хмару БЕЗ довгоживучих ключів: перевіряємо підпис короткоживучого id-токена публічним ключем провайдера й звіряємо iss/aud/sub саме з цим файлом. Жодного секрета тут немає — лише умови довіри.",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "audience": "marketplace-prod",
+  "subjects": [
+    "repo:CouldBeFree/marketplace:ref:refs/heads/main",
+    "repo:CouldBeFree/marketplace:environment:prod"
+  ],
+  "subjectPattern": "^repo:CouldBeFree(@[0-9]+)?/marketplace(@[0-9]+)?:(ref:refs/heads/main|environment:prod)$",
+  "_subjectPattern_comment": "Репозиторії, створені після 2026-07-15, мають sub в ID-формі repo:OWNER@ID/REPO@ID:... — патерн приймає обидві форми, тож гейт не зламається від дати створення."
+}

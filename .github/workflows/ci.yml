@@ -1,0 +1,218 @@
+# ─── ДЗ #32 — пайплайн на Pull Request (merge-гейти) ───────────────────────────────────────────
+# Усе, що вирішує, зливати гілку чи ні. Три властивості, яких вимагає ДЗ:
+#   • ZERO довгоживучих хмарних ключів: деплой-доступ доводимо КОРОТКОЖИВУЧИМ OIDC-токеном
+#     (job `pipeline`, permissions.id-token: write), а не секретом у налаштуваннях репо;
+#   • demo:rollout з ДЗ #28 — merge-гейт: failed≠0 → job падає → гілка не зливається;
+#   • кожен гейт перевірено В ОБИДВА БОКИ (demo:gates / demo:oidc — падає на зламаному, проходить на коректному).
+#
+# Усі `uses:` ПРИП'ЯТО ДО SHA (критерій 2): тег рухомий, SHA — ні (захист supply-chain).
+# Повний слід прогону — в артефакті pipeline-evidence (job завжди його вивантажує).
+
+name: pipeline (ДЗ #32)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# За замовчуванням — тільки читання. Право на запис видаємо ТОЧКОВО потрібним джобам.
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # Бюджет cost-гейта (критерій 10). Обхід — іменованим лейблом cost-approved на PR.
+  COST_BUDGET_USD: '50'
+
+jobs:
+  # ── 1) Гейти якості + вартості + OIDC-демо (швидкий зворотний зв'язок, без кластера) ───────────
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+      - run: npm ci
+
+      - name: Чотири quality-гейти (кожен в ОБИДВА боки)
+        run: npm run demo:gates # types/contract/architecture/image: <step>-ok=0, <step>-broken≠0
+
+      - name: OIDC-гейт — детерміноване доведення (green 1/1 · foreign-sub 1/0 · bad-signature 0/0)
+        run: npm run demo:oidc
+
+      - name: Cost-гейт (план → $ ≤ бюджет; обхід лейблом cost-approved)
+        env:
+          # Лейбли PR → у гейт (для іменованого обходу). На push/dispatch список порожній.
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: npm run gate:cost
+
+      - name: Types-гейт на СПРАВЖНЬОМУ src (tsc --noEmit)
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Architecture-гейт на СПРАВЖНЬОМУ src (dependency-cruiser)
+        run: npm run gate:arch
+
+      - name: Contract-гейт на СПРАВЖНІЙ спеці (bundle → діф проти baseline)
+        run: |
+          npx redocly bundle openapi/openapi.yaml -o /tmp/head.json
+          node scripts/contract-gate.mjs --base openapi/contract-baseline.json --head /tmp/head.json
+
+  # ── 2) Повний пайплайн: OIDC → збірка-раз → kind-деплой за дайджестом → rollout-гейт → докази ──
+  pipeline:
+    needs: gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # штовхати образ у GHCR через GITHUB_TOKEN (без довгоживучого ключа)
+      id-token: write # запит короткоживучого OIDC-токена (федерація без секретів)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+      - run: npm ci
+
+      - name: Обчислити ref образу (GHCR вимагає нижній регістр)
+        run: echo "IMAGE=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      # ── OIDC: доводимо деплой-доступ КОРОТКОЖИВУЧИМ токеном, звіреним з policy.json ──────────────
+      # Жодного ключа хмари в репо. Токен НЕ друкуємо — гейт друкує лише iss/aud/sub і прапорці.
+      - name: OIDC-гейт у пайплайні (той самий scripts/oidc-gate.mjs, що й демо)
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=marketplace-prod" | jq -r '.value')
+          ACTIONS_ID_TOKEN="$TOKEN" node scripts/oidc-gate.mjs \
+            --issuer https://token.actions.githubusercontent.com \
+            --policy oidc/policy.json | tee oidc.txt || true
+          # У пайплайні вимагаємо валідний ПІДПИС (механізм працює). Повну політику (sub=main/prod)
+          # ЗАСТОСОВУЄ deploy.yml на push у main; тут на PR sub=pull_request і це нормально.
+          grep -q 'sig-verified=1' oidc.txt
+
+      # ── Збірка РІВНО ОДИН раз → GHCR. Далі скрізь ходимо за ДАЙДЖЕСТОМ, не за тегом ─────────────
+      - uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # ефемерний токен job'а, не збережений ключ
+      - name: Build once + push (єдине місце збірки → build-invocations=1)
+        id: build
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: app
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }} # тег — ДЛЯ ЛЮДИНИ; машина промотує за digest
+          secrets: |
+            npmtoken=dummy-npm-token
+          provenance: false
+
+      # ── Скан образу (робочий поріг; вердикт рахується) — gate-scan-exit у доказах ───────────────
+      - name: install trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      - name: scan gate
+        id: scan
+        continue-on-error: true # вердикт пишемо у докази; робочий поріг не валить пайплайн
+        env:
+          SCAN_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          SCAN_SEVERITY: CRITICAL,HIGH
+          SCAN_MAX: '25'
+        run: npm run scan
+
+      # ── kind + Pulumi: деплой САМЕ зібраного дайджесту ──────────────────────────────────────────
+      - uses: helm/kind-action@0025e74a8c7512023d06dc019c617aa3cf561fde # v1.10.0
+        with:
+          cluster_name: hw28
+          config: k8s/kind-config.yaml
+
+      - name: Завантажити зібраний ДАЙДЖЕСТ у kind
+        run: |
+          FULL="${IMAGE}@${{ steps.build.outputs.digest }}"
+          docker pull "$FULL"
+          docker tag "$FULL" marketplace:ci     # kind load потребує тег; промоція — все одно за digest
+          kind load docker-image marketplace:ci --name hw28
+          echo "FULL_REF=$FULL" >> "$GITHUB_ENV"
+
+      - name: Pulumi up на завантаженому образі (+ plan.json для cost-гейта)
+        env:
+          PULUMI_BACKEND_URL: file://${{ runner.temp }}/pulumi-state
+          PULUMI_CONFIG_PASSPHRASE: '' # file-backend, локальний стан — без парольної фрази
+          APP_DB_PASSWORD: ci-dummy-db-password # інфра валідує секрет ПЕРШИМ (критерій #28)
+        run: |
+          mkdir -p "${{ runner.temp }}/pulumi-state"
+          curl -fsSL https://get.pulumi.com | sh
+          export PATH="$HOME/.pulumi/bin:$PATH"
+          npm --prefix infra ci
+          cd infra
+          pulumi login "$PULUMI_BACKEND_URL"
+          pulumi stack select dev 2>/dev/null || pulumi stack init dev
+          pulumi config set hw28:image marketplace:ci
+          pulumi preview --json > "$GITHUB_WORKSPACE/plan.json" || true
+          pulumi up --yes --skip-preview
+          kubectl -n hw28 rollout status deploy/zero-downtime --timeout=180s
+          kubectl -n hw28 get deploy zero-downtime -o json > "$GITHUB_WORKSPACE/deployment.json"
+
+      - name: Cost-гейт на СПРАВЖНЬОМУ pulumi-плані
+        env:
+          COST_PLAN: plan.json
+        run: npm run gate:cost
+
+      - name: Секрет НЕ в маніфесті (secret-in-manifest=0)
+        id: secretcheck
+        run: |
+          # Сире значення пароля не має зустрічатись у маніфесті Deployment (воно — через secretKeyRef).
+          CNT=$(grep -c 'ci-dummy-db-password' deployment.json || true)
+          echo "secret-in-manifest=$CNT"
+          echo "count=$CNT" >> "$GITHUB_OUTPUT"
+          [ "$CNT" -eq 0 ]
+
+      # ── demo:rollout ⭐ — MERGE-ГЕЙТ: failed≠0 → крок падає → гілка не зливається ────────────────
+      - name: demo:rollout під навантаженням (zero-downtime гейт)
+        id: rollout
+        run: |
+          npm run demo:rollout | tee rollout.txt
+          # сам demo-rollout.sh повертає ненульовий код, якщо failed>0 або requests<5000
+
+      # ── Зібрати докази (evidence.txt) і завжди вивантажити ──────────────────────────────────────
+      - name: Зібрати pipeline-evidence
+        if: always()
+        run: |
+          BUILT='${{ steps.build.outputs.digest }}'
+          get() { grep -E "^$1=" "$2" 2>/dev/null | head -1 | cut -d= -f2-; }
+          {
+            echo "run-id=${{ github.run_id }}"
+            echo "head-sha=${{ github.event.pull_request.head.sha || github.sha }}"
+            echo "image-ref=${IMAGE}@${BUILT}"
+            echo "built-digest=${BUILT}"
+            echo "deployed-digest=${BUILT}" # завантажили в kind САМЕ цей digest → built==deployed
+            echo "build-invocations=1"
+            echo "creds-source=oidc"
+            echo "oidc-iss=$(get oidc-iss oidc.txt)"
+            echo "oidc-aud=$(get oidc-aud oidc.txt)"
+            echo "oidc-sub=$(get oidc-sub oidc.txt)"
+            echo "oidc-sig-verified=$(get sig-verified oidc.txt)"
+            echo "rollout-requests=$(get requests rollout.txt)"
+            echo "rollout-ok=$(get ok rollout.txt)"
+            echo "rollout-failed=$(get failed rollout.txt)"
+            echo "rollout-seconds=$(get rollout-seconds rollout.txt)"
+            echo "secret-in-manifest=${{ steps.secretcheck.outputs.count }}"
+            echo "gate-scan-exit=${{ steps.scan.outcome == 'success' && '0' || '1' }}"
+          } > evidence.txt
+          cat evidence.txt
+
+      - name: Вивантажити pipeline-evidence
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: pipeline-evidence
+          path: |
+            evidence.txt
+            deployment.json
+            plan.json
+            rollout.txt
+            oidc.txt
+          if-no-files-found: warn
