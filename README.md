@@ -680,6 +680,95 @@ demo:metrics  sent-ok=100 sent-fail=30 counter-delta=130 errors-delta=30 above-t
 demo:trace    spans=2 orphan-spans=0 trace-matches-header=1 trace-matches-log=1 span-status-error=1
 ```
 
+## CI/CD (ДЗ #32)
+
+Пайплайн на GitHub Actions із трьома обіцянками, кожна з яких перевірна:
+
+1. **ZERO довгоживучих хмарних ключів.** Деплой-доступ доводимо **короткоживучим OIDC-токеном**
+   GitHub Actions, звіреним із `oidc/policy.json`, а не секретом у налаштуваннях репо. Образ у GHCR
+   штовхаємо ефемерним `GITHUB_TOKEN` самого прогону.
+2. **`demo:rollout` з ДЗ #28 — merge-гейт.** У `ci.yml` він ганяється на реальному kind-кластері;
+   `failed≠0` → крок падає → job червоний → **гілка не зливається**.
+3. **Кожен гейт перевірено в ОБИДВА боки** — падає на зламаному вводі, проходить на коректному.
+   Це доводять самодостатні демо нижче (їх же ганяє CI).
+
+### Два workflow
+
+| Файл | Тригер | Роль |
+|---|---|---|
+| `.github/workflows/ci.yml` | `pull_request`, `workflow_dispatch` | merge-гейти: 4 quality-гейти, cost, OIDC(підпис), збірка-раз→GHCR за дайджестом, kind+Pulumi, `demo:rollout`-гейт, артефакт `pipeline-evidence` |
+| `.github/workflows/deploy.yml` | `push: main`, `workflow_dispatch` | деплой: OIDC-**політику застосовано** (на main `gate=pass` обов'язковий), збірка-раз, промоція **за дайджестом**, артефакт `deploy-evidence` |
+
+Усі `uses:` **прип'ято до commit-SHA** (не до рухомого тега) — захист ланцюга постачання (критерій 2).
+
+### Чотири quality-гейти (`npm run demo:gates`)
+
+Кожен друкує `<step>-ok=0` і `<step>-broken≠0`; `demo:gates=pass` лише якщо всі вісім умов збіглись.
+
+| Гейт | Інструмент | ok ⟶ 0 | broken ⟶ ≠0 |
+|---|---|---|---|
+| `types` | `tsc --noEmit --strict` | коректний `.ts` | тип-помилка |
+| `contract` | `scripts/contract-gate.mjs` | сумісна зміна OpenAPI | зникли шлях/відповідь, новий required-параметр |
+| `architecture` | `dependency-cruiser` | чистий граф | імпорт із `forbidden/` |
+| `image` | `scripts/scan.mjs` на фікс-звіті | `SCAN_MAX=99999` | `SCAN_MAX=-1` |
+
+У CI ті самі гейти ще й на **справжньому** коді: `tsc --noEmit` на `src`, `dependency-cruiser` на `src`
+(ORM-сутності виключено — двоспрямовані relations циклічні за типом навмисно), контракт `openapi.yaml`
+проти `openapi/contract-baseline.json`.
+
+### OIDC-гейт (`npm run demo:oidc`) ⭐⭐
+
+Той самий `scripts/oidc-gate.mjs`, що й у пайплайні (знає лише параметри: jwks/issuer, policy, token —
+тож «зелене локально» = «зелене в CI»). Демо саме собі провайдер: генерує RSA-пару, кладе публічний
+ключ у JWKS і підписує три токени. Очікувана матриця (підпис, політика):
+
+| case | sig-verified | policy-allow | чому |
+|---|---|---|---|
+| `green` | 1 | 1 | ключ у JWKS, iss/aud/sub за політикою |
+| `foreign-sub` | 1 | 0 | підпис валідний, але `sub` чужий |
+| `bad-signature` | 0 | 0 | підписано ключем поза JWKS → claims не докази |
+
+`policy.json`: `issuer` = `https://token.actions.githubusercontent.com`, `audience` = `marketplace-prod`,
+`subject` — лише `…:ref:refs/heads/main` / `…:environment:prod` (патерн приймає і ID-форму для нових репо).
+
+### Cost-гейт (`npm run gate:cost`) — критерій 10
+
+План інфраструктури → $ → порівняння з бюджетом. `src/mapping.ts` дістає `resources.requests` кожного
+контейнера × `replicas` і множить на **декларовані тарифи** (`cost/rates.json`):
+
+| Ресурс | Тариф |
+|---|---|
+| vCPU | **$24.00** / місяць |
+| пам'ять | **$3.00** / ГіБ-місяць |
+
+Джерело чисел — `infra/resources.ts` (ті самі, що їх отримує кластер): `replicas=2`, `cpu=250m`,
+`memory=256Mi` → **`plan-usd=13.50`** (завжди > 0). Порівнюємо **числа, не sha256 файлів** (Pulumi
+додає випадковий суфікс до імен → різні байти, та сама вартість). Перевірка в обидва боки:
+`COST_BUDGET_USD=0 → fail`, `COST_BUDGET_USD=999999 → pass`. Свідомо дорогу зміну пропускає **іменований
+лейбл PR** — `cost-gate-bypass-label: cost-approved` (апрув явний і лишає слід, а не «тихо вимкнув гейт»).
+
+### Збірка-раз-промоція-за-дайджестом
+
+Образ збирається **рівно в одному місці** (`build-invocations=1`). Далі скрізь — деплой, скан, kind —
+ходять за **дайджестом** (`image@sha256:…`), а не за тегом; тег `${{ github.sha }}` лишається тільки
+для людини. `built-digest == deployed-digest` — у доказах.
+
+### Секрети (жодного довгоживучого ключа хмари)
+
+| Секрет | Звідки | Тривалість | Навіщо |
+|---|---|---|---|
+| `GITHUB_TOKEN` | видає Actions на кожен прогін | ефемерний | штовхнути образ у GHCR (`packages: write`) |
+| OIDC id-token | запит на крок (`id-token: write`) | ~хвилини | довести деплой-доступ проти `policy.json` |
+| `npmtoken` | BuildKit-секрет збірки (dummy) | — | демонструє `--mount=type=secret`, у git його нема |
+
+Довгоживучих `AWS_*`/`GCP_*`/`AZURE_*` у налаштуваннях репо **немає** — у цьому суть варіанта «без хмари».
+
+### `pipeline-evidence` (артефакт прогону)
+
+`evidence.txt` (key=value) + `deployment.json` + `plan.json` + `rollout.txt` + `oidc.txt`. Ключові поля:
+`built-digest==deployed-digest`, `build-invocations=1`, `creds-source=oidc`, `oidc-sig-verified=1`,
+`rollout-failed=0` (`requests≥2000`), `secret-in-manifest=0`, `gate-scan-exit`.
+
 ## Grading
 
 Свіжий клон, чиста БД, без доступу до сховища. Виконати в корені репо:
@@ -822,6 +911,33 @@ npm run demo:trace    # spans=2 orphan-spans=0 trace-matches-header=1 trace-matc
 # дашборд: Grafana http://127.0.0.1:22903 (admin/admin), дашборд «Marketplace RED»
 docker compose -f observability/docker-compose.yml down   # прибрати
 ```
+
+**ДЗ #32 (CI/CD)** — локально-перевірна частина самодостатня (демо не потребують ні хмари, ні
+кластера, ні trivy); решту доводить реальний прогін GitHub Actions з артефактом `pipeline-evidence`.
+Виконати в корені репо:
+
+```bash
+npm ci
+npm run demo:gates     # types/contract/architecture/image: кожен <step>-ok=0, <step>-broken≠0 → demo:gates=pass
+npm run demo:oidc      # green 1/1 · foreign-sub 1/0 · bad-signature 0/0 → demo:oidc=pass  ⭐⭐
+COST_BUDGET_USD=999999 npm run gate:cost; echo "exit=$?"   # plan-usd=13.50 gate=pass exit 0
+COST_BUDGET_USD=0      npm run gate:cost; echo "exit=$?"   # gate=fail exit 1 (той самий план)
+COST_BUDGET_USD=0 PR_LABELS='["cost-approved"]' npm run gate:cost; echo "exit=$?"  # bypassed=1 pass
+
+# ті самі гейти на справжньому коді (їх ганяє job `gates` у ci.yml):
+npx tsc --noEmit -p tsconfig.json                                   # types на src
+npm run gate:arch                                                   # architecture на src (ORM-цикли виключено)
+npx redocly bundle openapi/openapi.yaml -o /tmp/head.json \
+  && node scripts/contract-gate.mjs --base openapi/contract-baseline.json --head /tmp/head.json
+
+# статичні перевірки політик пайплайна:
+grep -REc 'uses: .+@[0-9a-f]{40}' .github/workflows/   # усі екшени прип'ято до SHA (критерій 2)
+! grep -REn 'AWS_|GCP_|AZURE_|secrets\.(AWS|GCP|AZURE)' .github/workflows/  # нуль довгоживучих хмарних ключів (критерій 3)
+```
+
+Реальний пайплайн (критерії 5,7,8,9): відкрити PR → job `pipeline` у **Actions** збирає образ раз,
+штовхає в GHCR за дайджестом, піднімає kind, деплоїть Pulumi, ганяє `demo:rollout` як merge-гейт і
+вивантажує `pipeline-evidence`. Деталі й таблиця секретів — у розділі **## CI/CD (ДЗ #32)** вище.
 
 ## Міграції (без `synchronize`)
 

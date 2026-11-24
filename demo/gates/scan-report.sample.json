@@ -1,0 +1,16 @@
+{
+  "_comment": "Фіксований trivy-звіт для офлайн-перевірки гейта образу (ДЗ #32, demo:gates). Три знахідки CRITICAL/HIGH. scripts/scan.mjs із SCAN_REPORT=цей-файл рахує found=3: SCAN_MAX=-1 → fail, SCAN_MAX=99999 → pass. Структура — як у реального `trivy image --format json`.",
+  "SchemaVersion": 2,
+  "ArtifactName": "hw28-app:v1",
+  "Results": [
+    {
+      "Target": "hw28-app:v1 (debian 12)",
+      "Class": "os-pkgs",
+      "Vulnerabilities": [
+        { "VulnerabilityID": "CVE-DEMO-0001", "PkgName": "libssl", "Severity": "CRITICAL" },
+        { "VulnerabilityID": "CVE-DEMO-0002", "PkgName": "zlib", "Severity": "HIGH" },
+        { "VulnerabilityID": "CVE-DEMO-0003", "PkgName": "libc", "Severity": "HIGH" }
+      ]
+    }
+  ]
+}

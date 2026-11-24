@@ -1,5 +1,6 @@
 import * as pulumi from '@pulumi/pulumi';
 import * as k8s from '@pulumi/kubernetes';
+import { podResources } from './resources';
 
 // ── Валідація конфігу — ПЕРША дія програми (критерій 5) ──────────────────────────────────────
 // Без секрету зі сховища #11 розгортання ЗОБОВ'ЯЗАНЕ впасти й НАЗВАТИ змінну — ще до будь-якого
@@ -13,7 +14,7 @@ if (!dbPassword) {
 const cfg = new pulumi.Config();
 const namespace = cfg.get('namespace') ?? 'hw28';
 const image = cfg.get('image') ?? 'hw28-app:v1';
-const replicas = cfg.getNumber('replicas') ?? 2;
+const replicas = cfg.getNumber('replicas') ?? podResources.replicas;
 const rev = cfg.get('rev') ?? process.env.REV ?? 'r1';
 
 const appName = 'zero-downtime';
@@ -59,6 +60,9 @@ const deployment = new k8s.apps.v1.Deployment(
               image,
               imagePullPolicy: 'IfNotPresent', // образ у kind через kind load, не з реєстру
               ports: [{ containerPort: 8080 }],
+              // resources з єдиного джерела (infra/resources.ts): ті самі числа читає cost-гейт
+              // (ДЗ #32). requests потрібні й HPA, щоб рахувати утилізацію CPU (70%).
+              resources: { requests: podResources.requests, limits: podResources.limits },
               env: [
                 { name: 'REV', value: rev },
                 { name: 'DRAIN_MS', value: String(DRAIN_SECONDS * 1000) },
