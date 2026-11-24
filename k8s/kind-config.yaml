@@ -1,0 +1,11 @@
+# Локальний одновузловий кластер kind. extraPortMappings пробиває NodePort 30080 на хост —
+# генератор навантаження demo:rollout б'є http://localhost:30080 напряму (collapse з'єднання =
+# curl-код 000, а не HTTP 5xx; саме тому критерій рахує «не 200», а не «5xx»).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP

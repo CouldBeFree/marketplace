@@ -1,0 +1,3 @@
+name: hw28
+runtime: nodejs
+description: ДЗ #28 — zero-downtime rollout на локальному kind через типізовану Pulumi-програму

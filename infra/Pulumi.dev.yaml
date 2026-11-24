@@ -1,0 +1,5 @@
+config:
+  hw28:namespace: hw28
+  hw28:image: hw28-app:v1
+  hw28:replicas: "2"
+  hw28:rev: r1

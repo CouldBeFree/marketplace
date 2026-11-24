@@ -1,0 +1,10 @@
+{
+  "name": "hw28-zero-downtime-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Мінімальний zero-downtime HTTP-сервіс для ДЗ #28 (healthz/readyz + SIGTERM-дренаж)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

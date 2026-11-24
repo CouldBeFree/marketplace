@@ -33,3 +33,9 @@ CLAUDE.md
 
 # testkit: URI тестового контейнера
 test/integration/testkit/.db-url
+
+# ДЗ #28: декой-секрет етапу збірки (ніколи в git), локальний стан Pulumi (містить зашифрований
+# Secret — не для git), вивід tsc програми
+.npm_token
+.pulumi/
+infra/bin/
